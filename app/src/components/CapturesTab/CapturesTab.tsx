@@ -5,6 +5,7 @@ import { save } from '@tauri-apps/plugin-dialog';
 import { writeFile, writeTextFile } from '@tauri-apps/plugin-fs';
 import {
   Captions,
+  AlertTriangle,
   Check,
   ChevronDown,
   CircleDot,
@@ -14,6 +15,7 @@ import {
   FileText,
   Loader2,
   Mic,
+  RotateCcw,
   Settings2,
   Sparkles,
   Square,
@@ -76,6 +78,7 @@ import { useGenerationStore } from '@/stores/generationStore';
 import { usePlayerStore } from '@/stores/playerStore';
 
 const CAPTURE_AUDIO_MIME = 'audio/*,.wav,.mp3,.m4a,.flac,.ogg,.webm';
+const TRANSCRIPTION_FAILED_PREFIX = '[Transcription failed:';
 
 function formatDuration(ms?: number | null): string {
   if (!ms || ms < 0) return '0:00';
@@ -83,6 +86,10 @@ function formatDuration(ms?: number | null): string {
   const m = Math.floor(total / 60);
   const s = total % 60;
   return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function isTranscriptionFailed(capture: CaptureResponse | null): boolean {
+  return capture?.transcript_raw?.startsWith(TRANSCRIPTION_FAILED_PREFIX) ?? false;
 }
 
 function ChordKeys({ keys }: { keys: string[] }) {
@@ -139,6 +146,7 @@ export function CapturesTab() {
   const uploadInputRef = useRef<HTMLInputElement>(null);
 
   const snippetOf = (capture: CaptureResponse): string => {
+    if (isTranscriptionFailed(capture)) return 'Transcription failed. Retry available.';
     const source = capture.transcript_refined || capture.transcript_raw || '';
     return source.trim() || t('captures.snippetEmpty');
   };
@@ -243,9 +251,7 @@ export function CapturesTab() {
   // referenced profile was deleted) fall through to the first profile.
   const storedVoiceId = captureSettings?.default_playback_voice_id ?? null;
   const playAsVoice =
-    (storedVoiceId && profiles?.find((p) => p.id === storedVoiceId)) ||
-    profiles?.[0] ||
-    null;
+    (storedVoiceId && profiles?.find((p) => p.id === storedVoiceId)) || profiles?.[0] || null;
   const playAsVoiceId = playAsVoice?.id ?? null;
 
   const deleteMutation = useMutation({
@@ -255,12 +261,54 @@ export function CapturesTab() {
       queryClient.invalidateQueries({ queryKey: ['captures'] });
     },
     onError: (err: Error) => {
-      toast({ title: t('captures.toast.deleteFailed'), description: err.message, variant: 'destructive' });
+      toast({
+        title: t('captures.toast.deleteFailed'),
+        description: err.message,
+        variant: 'destructive',
+      });
+    },
+  });
+
+  const retranscribeMutation = useMutation({
+    mutationFn: async (captureId: string) => apiClient.retranscribeCapture(captureId, {}),
+    onSuccess: (capture) => {
+      queryClient.setQueryData<CaptureListResponse>(['captures'], (prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          items: prev.items.map((item) => (item.id === capture.id ? capture : item)),
+        };
+      });
+      queryClient.invalidateQueries({ queryKey: ['captures'] });
+      setSelectedId(capture.id);
+      if (isTranscriptionFailed(capture)) {
+        toast({
+          title: 'Transcription still failed',
+          description: 'The audio is still saved. Try again later or export the audio.',
+          variant: 'destructive',
+        });
+      } else {
+        setShowRefined(false);
+        toast({ title: 'Transcription recovered' });
+      }
+    },
+    onError: (err: Error) => {
+      toast({
+        title: 'Retry transcription failed',
+        description: err.message,
+        variant: 'destructive',
+      });
     },
   });
 
   const playAsMutation = useMutation({
-    mutationFn: async ({ capture, voice }: { capture: CaptureResponse; voice: VoiceProfileResponse }) => {
+    mutationFn: async ({
+      capture,
+      voice,
+    }: {
+      capture: CaptureResponse;
+      voice: VoiceProfileResponse;
+    }) => {
       const text = capture.transcript_refined || capture.transcript_raw;
       if (!text.trim()) throw new Error(t('captures.noTranscriptError'));
       const language = (capture.language || voice.language) as LanguageCode;
@@ -268,8 +316,13 @@ export function CapturesTab() {
       // profile's stored engine preference. Cloned profiles without an
       // override fall through to whatever the backend picks.
       const engine = voice.default_engine as
-        | 'qwen' | 'qwen_custom_voice' | 'luxtts' | 'chatterbox'
-        | 'chatterbox_turbo' | 'tada' | 'kokoro'
+        | 'qwen'
+        | 'qwen_custom_voice'
+        | 'luxtts'
+        | 'chatterbox'
+        | 'chatterbox_turbo'
+        | 'tada'
+        | 'kokoro'
         | undefined;
       return apiClient.generateSpeech({
         profile_id: voice.id,
@@ -286,7 +339,11 @@ export function CapturesTab() {
       addPendingGeneration(result.id);
     },
     onError: (err: Error) => {
-      toast({ title: t('captures.toast.playAsFailed'), description: err.message, variant: 'destructive' });
+      toast({
+        title: t('captures.toast.playAsFailed'),
+        description: err.message,
+        variant: 'destructive',
+      });
     },
   });
 
@@ -376,7 +433,8 @@ export function CapturesTab() {
     lines.push(`# Capture ${capture.id}`, '');
     lines.push(`- **Source:** ${capture.source}`);
     lines.push(`- **Created:** ${capture.created_at}`);
-    if (capture.duration_ms != null) lines.push(`- **Duration:** ${formatDuration(capture.duration_ms)}`);
+    if (capture.duration_ms != null)
+      lines.push(`- **Duration:** ${formatDuration(capture.duration_ms)}`);
     if (capture.language) lines.push(`- **Language:** ${capture.language}`);
     if (capture.stt_model) lines.push(`- **STT model:** ${capture.stt_model}`);
     if (capture.llm_model) lines.push(`- **LLM model:** ${capture.llm_model}`);
@@ -486,48 +544,58 @@ export function CapturesTab() {
                 </div>
               ) : (
                 filtered.map((capture) => {
-                const isActive = selectedId === capture.id;
-                const refined = !!capture.transcript_refined;
-                return (
-                  <button
-                    type="button"
-                    key={capture.id}
-                    onClick={() => setSelectedId(capture.id)}
-                    className={cn(
-                      'w-full text-left p-3 rounded-lg transition-colors block',
-                      isActive
-                        ? 'bg-muted/70 border border-border'
-                        : 'border border-transparent hover:bg-muted/30',
-                    )}
-                  >
-                    <div className="flex items-center gap-2 mb-1.5">
-                      <span className="text-[11px] text-muted-foreground font-medium">
-                        {formatDate(capture.created_at)}
-                      </span>
-                      <div className="flex-1" />
-                      <span className="text-[10px] text-muted-foreground/70 tabular-nums">
-                        {formatDuration(capture.duration_ms)}
-                      </span>
-                    </div>
-                    <div className="text-[13px] text-foreground/90 line-clamp-2 leading-snug mb-2">
-                      {snippetOf(capture)}
-                    </div>
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      <SourceBadge source={capture.source} />
-                      {refined && (
-                        <Badge
-                          variant="secondary"
-                          className="h-5 px-1.5 text-[10px] gap-1 font-medium bg-accent/10 text-accent border border-accent/20"
-                        >
-                          <Sparkles className="h-2.5 w-2.5" />
-                          {t('captures.transcript.refined')}
-                        </Badge>
+                  const isActive = selectedId === capture.id;
+                  const refined = !!capture.transcript_refined;
+                  const failed = isTranscriptionFailed(capture);
+                  return (
+                    <button
+                      type="button"
+                      key={capture.id}
+                      onClick={() => setSelectedId(capture.id)}
+                      className={cn(
+                        'w-full text-left p-3 rounded-lg transition-colors block',
+                        isActive
+                          ? 'bg-muted/70 border border-border'
+                          : 'border border-transparent hover:bg-muted/30',
                       )}
-                    </div>
-                  </button>
-                );
-              })
-            )}
+                    >
+                      <div className="flex items-center gap-2 mb-1.5">
+                        <span className="text-[11px] text-muted-foreground font-medium">
+                          {formatDate(capture.created_at)}
+                        </span>
+                        <div className="flex-1" />
+                        <span className="text-[10px] text-muted-foreground/70 tabular-nums">
+                          {formatDuration(capture.duration_ms)}
+                        </span>
+                      </div>
+                      <div className="text-[13px] text-foreground/90 line-clamp-2 leading-snug mb-2">
+                        {snippetOf(capture)}
+                      </div>
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <SourceBadge source={capture.source} />
+                        {failed && (
+                          <Badge
+                            variant="secondary"
+                            className="h-5 px-1.5 text-[10px] gap-1 font-medium bg-destructive/10 text-destructive border border-destructive/20"
+                          >
+                            <AlertTriangle className="h-2.5 w-2.5" />
+                            Failed
+                          </Badge>
+                        )}
+                        {refined && (
+                          <Badge
+                            variant="secondary"
+                            className="h-5 px-1.5 text-[10px] gap-1 font-medium bg-accent/10 text-accent border border-accent/20"
+                          >
+                            <Sparkles className="h-2.5 w-2.5" />
+                            {t('captures.transcript.refined')}
+                          </Badge>
+                        )}
+                      </div>
+                    </button>
+                  );
+                })
+              )}
             </div>
           </ListPaneScroll>
         </ListPane>
@@ -578,7 +646,9 @@ export function CapturesTab() {
                     ) : (
                       <Upload className="h-4 w-4 mr-2" />
                     )}
-                    {session.isUploading ? t('captures.actions.importing') : t('captures.actions.import')}
+                    {session.isUploading
+                      ? t('captures.actions.importing')
+                      : t('captures.actions.import')}
                   </Button>
                 )}
               </>
@@ -670,11 +740,15 @@ export function CapturesTab() {
               </div>
               <div className="flex-1" />
               <span className="text-xs text-muted-foreground">
-                {showRefined && selected.transcript_refined
-                  ? t('captures.transcript.refinedHint', { model: selected.llm_model ?? llmModel })
-                  : selected.stt_model
-                    ? t('captures.transcript.rawHint', { model: selected.stt_model })
-                    : null}
+                {isTranscriptionFailed(selected)
+                  ? 'Saved audio can be retried'
+                  : showRefined && selected.transcript_refined
+                    ? t('captures.transcript.refinedHint', {
+                        model: selected.llm_model ?? llmModel,
+                      })
+                    : selected.stt_model
+                      ? t('captures.transcript.rawHint', { model: selected.stt_model })
+                      : null}
               </span>
             </div>
 
@@ -699,7 +773,9 @@ export function CapturesTab() {
                   variant="outline"
                   size="sm"
                   onClick={() => handlePlayAs()}
-                  disabled={!playAsVoice || playAsMutation.isPending}
+                  disabled={
+                    !playAsVoice || playAsMutation.isPending || isTranscriptionFailed(selected)
+                  }
                   className={cn(
                     'gap-2 rounded-r-none border-r-0 pr-3 pl-2 transition-colors',
                     playbackState !== 'idle' &&
@@ -748,11 +824,7 @@ export function CapturesTab() {
                     </DropdownMenuLabel>
                     <DropdownMenuSeparator />
                     {profiles?.map((v) => (
-                      <DropdownMenuItem
-                        key={v.id}
-                        onClick={() => handlePlayAs(v)}
-                        className="py-2"
-                      >
+                      <DropdownMenuItem key={v.id} onClick={() => handlePlayAs(v)} className="py-2">
                         <div className="flex-1 min-w-0">
                           <div className="text-sm font-medium truncate">{v.name}</div>
                           <div className="text-[11px] text-muted-foreground truncate">
@@ -772,10 +844,23 @@ export function CapturesTab() {
                 {t('captures.actions.copy')}
               </Button>
               <Button
+                variant={isTranscriptionFailed(selected) ? 'default' : 'outline'}
+                size="sm"
+                onClick={() => retranscribeMutation.mutate(selected.id)}
+                disabled={retranscribeMutation.isPending}
+              >
+                {retranscribeMutation.isPending ? (
+                  <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+                ) : (
+                  <RotateCcw className="h-3.5 w-3.5 mr-1.5" />
+                )}
+                {isTranscriptionFailed(selected) ? 'Retry transcription' : 'Redo transcription'}
+              </Button>
+              <Button
                 variant="outline"
                 size="sm"
                 onClick={() => session.refine(selected.id)}
-                disabled={session.isRefining}
+                disabled={session.isRefining || isTranscriptionFailed(selected)}
               >
                 {session.isRefining ? (
                   <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
@@ -864,9 +949,7 @@ export function CapturesTab() {
                     </div>
                   ) : null}
                 </div>
-                <p className="text-sm">
-                  {t('captures.empty.pressShortcut')}
-                </p>
+                <p className="text-sm">{t('captures.empty.pressShortcut')}</p>
               </div>
             ) : (
               <div className="max-w-sm mx-auto text-center space-y-3">
@@ -888,7 +971,9 @@ export function CapturesTab() {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>{t('captures.deleteDialog.title')}</AlertDialogTitle>
-            <AlertDialogDescription>{t('captures.deleteDialog.description')}</AlertDialogDescription>
+            <AlertDialogDescription>
+              {t('captures.deleteDialog.description')}
+            </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
@@ -898,7 +983,9 @@ export function CapturesTab() {
                 disabled={deleteMutation.isPending}
                 className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
               >
-                {deleteMutation.isPending ? t('captures.deleteDialog.deleting') : t('common.delete')}
+                {deleteMutation.isPending
+                  ? t('captures.deleteDialog.deleting')
+                  : t('common.delete')}
               </Button>
             </AlertDialogAction>
           </AlertDialogFooter>

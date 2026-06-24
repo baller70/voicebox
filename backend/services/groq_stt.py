@@ -11,14 +11,21 @@ import json
 import mimetypes
 import os
 import subprocess
+import tempfile
 import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
 from typing import Optional
 
+import soundfile as sf
+
+from ..utils.audio import load_audio
 
 GROQ_STT_MODEL = os.environ.get("VOICEBOX_GROQ_STT_MODEL", "whisper-large-v3-turbo")
+GROQ_STT_MAX_DIRECT_BYTES = int(os.environ.get("VOICEBOX_GROQ_STT_MAX_DIRECT_BYTES", "18000000"))
+GROQ_STT_CHUNK_SECONDS = float(os.environ.get("VOICEBOX_GROQ_STT_CHUNK_SECONDS", "110"))
+GROQ_STT_CHUNK_SAMPLE_RATE = 16000
 
 
 def is_enabled() -> bool:
@@ -34,6 +41,21 @@ def _transcribe_file_sync(path: str, language: Optional[str]) -> str:
     audio_path = Path(path)
     if not audio_path.exists():
         raise FileNotFoundError(f"Audio file not found: {path}")
+
+    if audio_path.stat().st_size > GROQ_STT_MAX_DIRECT_BYTES:
+        return _transcribe_file_in_chunks(api_key, audio_path, language)
+
+    try:
+        return _transcribe_file_once(api_key, audio_path, language)
+    except RuntimeError as e:
+        if _is_payload_too_large(e):
+            return _transcribe_file_in_chunks(api_key, audio_path, language)
+        raise
+
+
+def _transcribe_file_once(api_key: str, audio_path: Path, language: Optional[str]) -> str:
+    if not audio_path.exists():
+        raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
     fields = {
         "model": GROQ_STT_MODEL,
@@ -65,6 +87,35 @@ def _transcribe_file_sync(path: str, language: Optional[str]) -> str:
     if not isinstance(text, str):
         raise RuntimeError(f"Groq STT response did not include text: {payload!r}")
     return text.strip()
+
+
+def _transcribe_file_in_chunks(api_key: str, audio_path: Path, language: Optional[str]) -> str:
+    audio, sample_rate = load_audio(
+        str(audio_path),
+        sample_rate=GROQ_STT_CHUNK_SAMPLE_RATE,
+        mono=True,
+    )
+    chunk_samples = max(1, int(sample_rate * GROQ_STT_CHUNK_SECONDS))
+    parts: list[str] = []
+
+    with tempfile.TemporaryDirectory(prefix="voicebox-groq-stt-") as tmp_dir:
+        tmp_root = Path(tmp_dir)
+        for idx, start in enumerate(range(0, len(audio), chunk_samples), start=1):
+            chunk = audio[start : start + chunk_samples]
+            if len(chunk) == 0:
+                continue
+            chunk_path = tmp_root / f"{audio_path.stem}.part{idx:03d}.wav"
+            sf.write(str(chunk_path), chunk, sample_rate, format="WAV", subtype="PCM_16")
+            text = _transcribe_file_once(api_key, chunk_path, language)
+            if text:
+                parts.append(text)
+
+    return " ".join(parts).strip()
+
+
+def _is_payload_too_large(error: RuntimeError) -> bool:
+    message = str(error).lower()
+    return "413" in message or "payload too large" in message or "request entity too large" in message
 
 
 def _multipart_body(fields: dict[str, str], file_path: Path) -> tuple[bytes, str]:

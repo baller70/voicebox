@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 
 VALID_SOURCES = {"dictation", "recording", "file"}
+TRANSCRIPTION_FAILED_PREFIX = "[Transcription failed:"
 # Suffixes whisper's miniaudio loader can read directly. Anything outside
 # this set has to go through librosa for decode + a soundfile transcode
 # before whisper sees it.
@@ -56,6 +57,15 @@ def _to_response(row: DBCapture) -> CaptureResponse:
         refinement_flags=flags_model,
         created_at=row.created_at,
     )
+
+
+def failed_transcript(error: Exception | str) -> str:
+    message = str(error).strip() or "Unknown error"
+    return f"{TRANSCRIPTION_FAILED_PREFIX} {message}]"
+
+
+def is_transcription_failed_text(text: str | None) -> bool:
+    return bool(text and text.startswith(TRANSCRIPTION_FAILED_PREFIX))
 
 
 async def create_capture(
@@ -118,13 +128,21 @@ async def create_capture(
                 raw_path.unlink()
                 written_files.remove(raw_path)
 
-        if groq_stt.is_enabled():
+        use_groq = groq_stt.is_enabled()
+        if use_groq:
             resolved_stt = "groq-whisper-large-v3-turbo"
-            transcript = await groq_stt.transcribe_file(str(audio_path), language)
         else:
             whisper = get_whisper_model()
             resolved_stt = stt_model or whisper.model_size
-            transcript = await whisper.transcribe(str(audio_path), language, resolved_stt)
+
+        try:
+            if use_groq:
+                transcript = await groq_stt.transcribe_file(str(audio_path), language)
+            else:
+                transcript = await whisper.transcribe(str(audio_path), language, resolved_stt)
+        except Exception as transcribe_err:
+            logger.exception("Transcription failed for capture %s", capture_id)
+            transcript = failed_transcript(transcribe_err)
 
         row = DBCapture(
             id=capture_id,
@@ -224,13 +242,21 @@ async def retranscribe_capture(
     if not resolved or not resolved.exists():
         raise FileNotFoundError(f"Audio for capture {capture_id} is missing")
 
-    if groq_stt.is_enabled():
+    use_groq = groq_stt.is_enabled()
+    if use_groq:
         resolved_stt = "groq-whisper-large-v3-turbo"
-        transcript = await groq_stt.transcribe_file(str(resolved), language)
     else:
         whisper = get_whisper_model()
         resolved_stt = stt_model or whisper.model_size
-        transcript = await whisper.transcribe(str(resolved), language, resolved_stt)
+
+    try:
+        if use_groq:
+            transcript = await groq_stt.transcribe_file(str(resolved), language)
+        else:
+            transcript = await whisper.transcribe(str(resolved), language, resolved_stt)
+    except Exception as transcribe_err:
+        logger.exception("Retranscription failed for capture %s", capture_id)
+        transcript = failed_transcript(transcribe_err)
 
     row.transcript_raw = transcript
     row.stt_model = resolved_stt

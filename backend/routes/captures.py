@@ -60,10 +60,11 @@ async def create_capture_endpoint(
         logger.exception("Failed to create capture")
         raise HTTPException(status_code=500, detail=str(e))
 
+    transcription_failed = captures_service.is_transcription_failed_text(capture.transcript_raw)
     return models.CaptureCreateResponse(
         **capture.model_dump(),
-        auto_refine=bool(saved.auto_refine),
-        allow_auto_paste=bool(saved.allow_auto_paste),
+        auto_refine=bool(saved.auto_refine) and not transcription_failed,
+        allow_auto_paste=bool(saved.allow_auto_paste) and not transcription_failed,
     )
 
 
