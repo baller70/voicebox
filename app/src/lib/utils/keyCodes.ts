@@ -59,25 +59,9 @@ export function canonicalKeyFromEvent(event: KeyboardEvent): string | null {
         /^Key[A-Z]$/.test(code) ||
         /^Digit[0-9]$/.test(code) ||
         /^F([1-9]|1[0-2])$/.test(code) ||
-        [
-          'Space',
-          'Tab',
-          'Backspace',
-          'Delete',
-          'Escape',
-          'Insert',
-          'Home',
-          'End',
-          'PageUp',
-          'PageDown',
-          'CapsLock',
-          'Function',
-          'Minus',
-          'Equal',
-          'Quote',
-          'Comma',
-          'Slash',
-        ].includes(code)
+        ['Space', 'Tab', 'Backspace', 'Delete', 'Escape', 'Insert',
+          'Home', 'End', 'PageUp', 'PageDown', 'CapsLock', 'Function',
+          'Minus', 'Equal', 'Quote', 'Comma', 'Slash'].includes(code)
       ) {
         return code;
       }
@@ -85,10 +69,13 @@ export function canonicalKeyFromEvent(event: KeyboardEvent): string | null {
   }
 }
 
-const PLATFORM_IS_MAC = typeof navigator !== 'undefined' && /mac/i.test(navigator.platform);
+const PLATFORM_IS_MAC =
+  typeof navigator !== 'undefined' && /mac/i.test(navigator.platform);
 
 export function defaultChordKeys(mode: 'push' | 'toggle'): string[] {
-  const base = PLATFORM_IS_MAC ? ['MetaRight', 'AltGr'] : ['ControlRight', 'ShiftRight'];
+  const base = PLATFORM_IS_MAC
+    ? ['MetaRight', 'AltGr']
+    : ['ControlRight', 'ShiftRight'];
   return mode === 'toggle' ? [...base, 'Space'] : base;
 }
 
@@ -148,12 +135,7 @@ export function displayLabelForKey(name: string): string {
  * right-hand keys.
  */
 export function modifierSideHint(name: string): 'L' | 'R' | null {
-  if (
-    name === 'MetaRight' ||
-    name === 'AltGr' ||
-    name === 'ControlRight' ||
-    name === 'ShiftRight'
-  ) {
+  if (name === 'MetaRight' || name === 'AltGr' || name === 'ControlRight' || name === 'ShiftRight') {
     return 'R';
   }
   if (name === 'MetaLeft' || name === 'Alt' || name === 'ControlLeft' || name === 'ShiftLeft') {
@@ -167,7 +149,7 @@ export function isModifierKey(name: string): boolean {
 }
 
 export function isValidChord(keys: string[]): boolean {
-  return keys.length > 0;
+  return keys.length > 0 && keys.some((key) => !isModifierKey(key));
 }
 
 /**
@@ -176,14 +158,10 @@ export function isValidChord(keys: string[]): boolean {
  * how every macOS shortcut docs list the keys.
  */
 const SORT_ORDER: Record<string, number> = {
-  ControlLeft: 0,
-  ControlRight: 0,
-  Alt: 1,
-  AltGr: 1,
-  ShiftLeft: 2,
-  ShiftRight: 2,
-  MetaLeft: 3,
-  MetaRight: 3,
+  ControlLeft: 0, ControlRight: 0,
+  Alt: 1, AltGr: 1,
+  ShiftLeft: 2, ShiftRight: 2,
+  MetaLeft: 3, MetaRight: 3,
   Function: 4,
   CapsLock: 5,
 };
