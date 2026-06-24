@@ -16,9 +16,22 @@ mod speak_monitor;
 mod synthetic_keys;
 
 use std::sync::Mutex;
+use std::time::Duration;
 use tauri::{command, State, Manager, WindowEvent, Emitter, Listener, RunEvent, WebviewUrl, WebviewWindowBuilder, PhysicalPosition};
 use tauri_plugin_shell::ShellExt;
 use tokio::sync::mpsc;
+
+#[cfg(desktop)]
+fn log_hotkey_debug(line: &str) {
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/voicebox-hotkey-debug.log")
+    {
+        let _ = writeln!(file, "{line}");
+    }
+}
 
 pub const DICTATE_WINDOW_LABEL: &str = "dictate";
 const DICTATE_WINDOW_WIDTH: f64 = 420.0;
@@ -891,6 +904,14 @@ pub struct HotkeyState {
 }
 
 #[cfg(desktop)]
+#[derive(Debug, serde::Deserialize)]
+struct CaptureHotkeySettings {
+    hotkey_enabled: bool,
+    chord_push_to_talk_keys: Vec<String>,
+    chord_toggle_to_talk_keys: Vec<String>,
+}
+
+#[cfg(desktop)]
 fn build_chord_bindings(
     push_to_talk: &[String],
     toggle_to_talk: &[String],
@@ -921,6 +942,98 @@ fn build_chord_bindings(
     Ok(bindings)
 }
 
+#[cfg(desktop)]
+fn arm_hotkey_monitor(
+    app: &tauri::AppHandle,
+    state: &HotkeyState,
+    push_to_talk: Vec<String>,
+    toggle_to_talk: Vec<String>,
+) -> Result<(), String> {
+    log_hotkey_debug(&format!(
+        "enable_hotkey push={push_to_talk:?} toggle={toggle_to_talk:?}"
+    ));
+    let bindings = build_chord_bindings(&push_to_talk, &toggle_to_talk)?;
+
+    let trusted = input_monitoring::request();
+    log_hotkey_debug(&format!("input_monitoring_request trusted={trusted}"));
+
+    if app.get_webview_window(DICTATE_WINDOW_LABEL).is_none() {
+        if let Err(e) = build_dictate_window(app) {
+            eprintln!("Failed to build dictate window: {}", e);
+        }
+    }
+
+    let mut slot = state.monitor.lock().map_err(|e| e.to_string())?;
+    match slot.as_mut() {
+        Some(monitor) => monitor.update_bindings(bindings),
+        None => {
+            log_hotkey_debug("spawning HotkeyMonitor");
+            *slot = Some(hotkey_monitor::HotkeyMonitor::spawn(app.clone(), bindings));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(desktop)]
+fn spawn_hotkey_auto_arm(app: tauri::AppHandle) {
+    std::thread::Builder::new()
+        .name("voicebox-hotkey-auto-arm".into())
+        .spawn(move || {
+            let client = match reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(3))
+                .build()
+            {
+                Ok(client) => client,
+                Err(err) => {
+                    log_hotkey_debug(&format!("auto_arm client failed: {err}"));
+                    return;
+                }
+            };
+
+            for attempt in 1..=90 {
+                if !check_health(SERVER_PORT) {
+                    std::thread::sleep(Duration::from_millis(500));
+                    continue;
+                }
+
+                let settings = client
+                    .get(format!("http://127.0.0.1:{SERVER_PORT}/settings/captures"))
+                    .send()
+                    .and_then(|resp| resp.error_for_status())
+                    .and_then(|resp| resp.json::<CaptureHotkeySettings>());
+
+                match settings {
+                    Ok(settings) => {
+                        log_hotkey_debug(&format!(
+                            "auto_arm settings enabled={} push={:?} toggle={:?}",
+                            settings.hotkey_enabled,
+                            settings.chord_push_to_talk_keys,
+                            settings.chord_toggle_to_talk_keys
+                        ));
+                        if settings.hotkey_enabled {
+                            let state = app.state::<HotkeyState>();
+                            if let Err(err) = arm_hotkey_monitor(
+                                &app,
+                                &state,
+                                settings.chord_push_to_talk_keys,
+                                settings.chord_toggle_to_talk_keys,
+                            ) {
+                                log_hotkey_debug(&format!("auto_arm failed: {err}"));
+                            }
+                        }
+                        return;
+                    }
+                    Err(err) => {
+                        log_hotkey_debug(&format!("auto_arm attempt {attempt} failed: {err}"));
+                        std::thread::sleep(Duration::from_millis(500));
+                    }
+                }
+            }
+            log_hotkey_debug("auto_arm gave up waiting for capture settings");
+        })
+        .expect("spawn hotkey auto-arm thread");
+}
+
 /// Spawn the global hotkey monitor on first call; subsequent calls just push
 /// the new bindings into the existing monitor. Idempotent on purpose — the
 /// frontend invokes this both at startup (when `capture_settings.hotkey_enabled`
@@ -937,53 +1050,7 @@ fn enable_hotkey(
     push_to_talk: Vec<String>,
     toggle_to_talk: Vec<String>,
 ) -> Result<(), String> {
-    fn log_hotkey_debug(line: &str) {
-        use std::io::Write;
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/tmp/voicebox-hotkey-debug.log")
-        {
-            let _ = writeln!(file, "{line}");
-        }
-    }
-
-    log_hotkey_debug(&format!(
-        "enable_hotkey push={push_to_talk:?} toggle={toggle_to_talk:?}"
-    ));
-    let bindings = build_chord_bindings(&push_to_talk, &toggle_to_talk)?;
-
-    // Fire the Input Monitoring TCC prompt explicitly from the user's
-    // toggle click, before keytap's Tap would do it implicitly via
-    // CGEventTap creation. Two reasons: (1) the prompt timing becomes
-    // deterministic — it appears in response to a click instead of as a
-    // mysterious side-effect of "the app started"; (2) on subsequent
-    // launches we can short-circuit the spawn entirely if the user
-    // revoked the grant, instead of relying on the tap silently failing.
-    // The call returns the current grant state; we ignore it because
-    // keytap surfaces its own error via stderr, and the settings UI
-    // polls `check_input_monitoring_permission` separately.
-    let trusted = input_monitoring::request();
-    log_hotkey_debug(&format!("input_monitoring_request trusted={trusted}"));
-
-    // The dictate pill webview must exist before the first chord fires so it
-    // can subscribe to `dictate:start`. Build it here (idempotent — Tauri
-    // returns the existing window when one with this label already exists).
-    if app.get_webview_window(DICTATE_WINDOW_LABEL).is_none() {
-        if let Err(e) = build_dictate_window(&app) {
-            eprintln!("Failed to build dictate window: {}", e);
-        }
-    }
-
-    let mut slot = state.monitor.lock().map_err(|e| e.to_string())?;
-    match slot.as_mut() {
-        Some(monitor) => monitor.update_bindings(bindings),
-        None => {
-            log_hotkey_debug("spawning HotkeyMonitor");
-            *slot = Some(hotkey_monitor::HotkeyMonitor::spawn(app, bindings));
-        }
-    }
-    Ok(())
+    arm_hotkey_monitor(&app, &state, push_to_talk, toggle_to_talk)
 }
 
 /// Quiet the global hotkey. Tears down the `ChordMatcher` (which stops
@@ -1406,11 +1473,11 @@ pub fn run() {
                 // so QWERTY keycode 9 produces Cmd+. on Dvorak).
                 keyboard_layout::init();
 
-                // HotkeyMonitor is spawned lazily via the `enable_hotkey`
-                // command — see HotkeyState. The hidden dictate webview is
-                // safe to build up front because it does not create the global
-                // keyboard tap or trigger the macOS Input Monitoring prompt.
+                // HotkeyMonitor is owned by Rust. The frontend may still call
+                // `enable_hotkey`, but startup also auto-arms from saved
+                // capture settings once the local backend is healthy.
                 app.manage(HotkeyState::default());
+                spawn_hotkey_auto_arm(app.handle().clone());
 
                 // The frontend emits `dictate:hide` whenever the pill cycle
                 // finishes (rest-fade → hidden). `hide()` alone has been

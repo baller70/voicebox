@@ -28,7 +28,7 @@ import { usePlatform } from '@/platform/PlatformContext';
 export function useChordSync() {
   const platform = usePlatform();
   const { settings } = useCaptureSettings();
-  const { stt, llm } = useDictationReadiness();
+  const { stt, llm, inputMonitoring } = useDictationReadiness();
   const enabled = settings?.hotkey_enabled;
   const pushKeys = settings?.chord_push_to_talk_keys;
   const toggleKeys = settings?.chord_toggle_to_talk_keys;
@@ -36,18 +36,28 @@ export function useChordSync() {
   useEffect(() => {
     if (!platform.metadata.isTauri) return;
     if (enabled === undefined || !pushKeys || !toggleKeys) return;
-    const modelsReady = Boolean(stt?.ready && llm?.ready);
-    const shouldArm = enabled && modelsReady;
+    const shouldArm = enabled;
     const command = shouldArm ? 'enable_hotkey' : 'disable_hotkey';
     const args = shouldArm ? { pushToTalk: pushKeys, toggleToTalk: toggleKeys } : {};
+    invoke('debug_log_line', {
+      line: `[chord-sync] ${command} enabled=${enabled} stt=${stt?.ready ?? 'unknown'} llm=${
+        llm?.ready ?? 'unknown'
+      } inputMonitoring=${inputMonitoring} push=${pushKeys.join('+')} toggle=${toggleKeys.join(
+        '+',
+      )}`,
+    }).catch(() => {});
     invoke(command, args).catch((err) => {
       console.warn(`[chord-sync] ${command} failed:`, err);
+      invoke('debug_log_line', { line: `[chord-sync] ${command} failed: ${String(err)}` }).catch(
+        () => {},
+      );
     });
   }, [
     platform.metadata.isTauri,
     enabled,
     stt?.ready,
     llm?.ready,
+    inputMonitoring,
     // Stringify so a referentially-new array with the same content
     // doesn't fire a redundant invoke on every settings refetch.
     pushKeys?.join(','),
