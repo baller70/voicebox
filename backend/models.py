@@ -12,25 +12,7 @@ from .utils.capture_chords import (
 )
 
 
-MODIFIER_CHORD_KEYS = {
-    "MetaLeft",
-    "MetaRight",
-    "Alt",
-    "AltGr",
-    "ControlLeft",
-    "ControlRight",
-    "ShiftLeft",
-    "ShiftRight",
-    "Function",
-    "CapsLock",
-}
-
-
-def validate_chord_has_action_key(keys: Optional[List[str]]) -> Optional[List[str]]:
-    if keys is None:
-        return keys
-    if not any(key not in MODIFIER_CHORD_KEYS for key in keys):
-        raise ValueError("Shortcut must include a non-modifier key")
+def validate_chord_keys_not_empty(keys: Optional[List[str]]) -> Optional[List[str]]:
     return keys
 
 
@@ -310,7 +292,7 @@ class CaptureSettingsUpdate(BaseModel):
     @field_validator("chord_push_to_talk_keys", "chord_toggle_to_talk_keys")
     @classmethod
     def validate_chord_keys(cls, keys: Optional[List[str]]) -> Optional[List[str]]:
-        return validate_chord_has_action_key(keys)
+        return validate_chord_keys_not_empty(keys)
 
 
 class GenerationSettingsResponse(BaseModel):
