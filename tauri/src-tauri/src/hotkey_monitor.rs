@@ -25,6 +25,7 @@
 //! with the OS / app.
 
 use std::collections::{HashMap, HashSet};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -45,6 +46,19 @@ fn log_hotkey_debug(line: &str) {
         .open("/tmp/voicebox-hotkey-debug.log")
     {
         let _ = writeln!(file, "{line}");
+    }
+}
+
+fn play_recording_cue(sound: &str) {
+    let path = format!("/System/Library/Sounds/{sound}.aiff");
+    if let Err(err) = Command::new("/usr/bin/afplay")
+        .arg(&path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        log_hotkey_debug(&format!("recording cue failed {sound}: {err}"));
     }
 }
 
@@ -250,6 +264,7 @@ fn process_event(
 fn apply_effect(app: &AppHandle, effect: Effect) {
     match effect {
         Effect::StartRecording(_) => {
+            play_recording_cue("Ping");
             // Snapshot focus BEFORE we touch the window — any AppKit
             // reshuffle triggered by set_position / show could in principle
             // steal key focus and poison the reading. In practice those
@@ -303,11 +318,14 @@ fn apply_effect(app: &AppHandle, effect: Effect) {
             }
         }
         Effect::StopRecording(_) => {
+            play_recording_cue("Pop");
             if let Some(window) = app.get_webview_window(DICTATE_WINDOW_LABEL) {
                 let _ = window.emit("dictate:stop", ());
             }
         }
         Effect::RestartRecording(_) => {
+            play_recording_cue("Pop");
+            play_recording_cue("Ping");
             if let Some(window) = app.get_webview_window(DICTATE_WINDOW_LABEL) {
                 let _ = window.emit("dictate:restart", ());
             }
