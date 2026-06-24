@@ -36,8 +36,9 @@ fn main() {
     {
         // voicebox.icon is in tauri/assets/voicebox.icon (one level up from src-tauri)
         let icon_source = format!("{}/../assets/voicebox.icon", project_root);
+        let skip_actool = std::env::var("VOICEBOX_SKIP_ACTOOL").ok().as_deref() == Some("1");
 
-        if std::path::Path::new(&icon_source).exists() {
+        if std::path::Path::new(&icon_source).exists() && !skip_actool {
             println!("cargo:rerun-if-changed={}", icon_source);
             println!("cargo:rerun-if-changed={}/icon.json", icon_source);
             println!("cargo:rerun-if-changed={}/Assets", icon_source);
@@ -145,6 +146,8 @@ fn main() {
                     std::fs::remove_dir_all(&iconset_dir).ok();
                 }
             }
+        } else if skip_actool {
+            println!("cargo:warning=Skipping actool icon compilation because VOICEBOX_SKIP_ACTOOL=1");
         } else {
             println!(
                 "cargo:warning=Icon source not found at {}, skipping icon compilation",

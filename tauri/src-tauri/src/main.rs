@@ -850,6 +850,23 @@ fn check_accessibility_permission() -> bool {
     accessibility::is_trusted()
 }
 
+fn append_paste_debug(line: &str) {
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/voicebox-paste-debug.log")
+    {
+        let _ = writeln!(file, "{line}");
+    }
+}
+
+#[command]
+fn debug_log_line(line: String) -> Result<(), String> {
+    append_paste_debug(&line);
+    Ok(())
+}
+
 /// Reports whether the process can observe global keyboard events. Read by
 /// the Captures settings UI to surface a "missing — open Settings" hint
 /// beside the hotkey toggle. No prompt side-effect.
@@ -920,6 +937,20 @@ fn enable_hotkey(
     push_to_talk: Vec<String>,
     toggle_to_talk: Vec<String>,
 ) -> Result<(), String> {
+    fn log_hotkey_debug(line: &str) {
+        use std::io::Write;
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/voicebox-hotkey-debug.log")
+        {
+            let _ = writeln!(file, "{line}");
+        }
+    }
+
+    log_hotkey_debug(&format!(
+        "enable_hotkey push={push_to_talk:?} toggle={toggle_to_talk:?}"
+    ));
     let bindings = build_chord_bindings(&push_to_talk, &toggle_to_talk)?;
 
     // Fire the Input Monitoring TCC prompt explicitly from the user's
@@ -932,7 +963,8 @@ fn enable_hotkey(
     // The call returns the current grant state; we ignore it because
     // keytap surfaces its own error via stderr, and the settings UI
     // polls `check_input_monitoring_permission` separately.
-    let _ = input_monitoring::request();
+    let trusted = input_monitoring::request();
+    log_hotkey_debug(&format!("input_monitoring_request trusted={trusted}"));
 
     // The dictate pill webview must exist before the first chord fires so it
     // can subscribe to `dictate:start`. Build it here (idempotent — Tauri
@@ -947,6 +979,7 @@ fn enable_hotkey(
     match slot.as_mut() {
         Some(monitor) => monitor.update_bindings(bindings),
         None => {
+            log_hotkey_debug("spawning HotkeyMonitor");
             *slot = Some(hotkey_monitor::HotkeyMonitor::spawn(app, bindings));
         }
     }
@@ -1066,23 +1099,57 @@ async fn paste_final_text(
     text: String,
     focus: focus_capture::FocusSnapshot,
 ) -> Result<bool, String> {
+    append_paste_debug(&format!(
+        "paste_final_text start len={} focus_pid={} focus_bundle={:?} focus_role={:?}",
+        text.len(),
+        focus.pid,
+        focus.bundle_id,
+        focus.role
+    ));
     if focus.bundle_id.as_deref() == Some(VOICEBOX_BUNDLE_ID) {
+        append_paste_debug("paste_final_text skipped: focus is Voicebox");
         return Ok(false);
     }
-    if !accessibility::is_trusted() {
+    let accessibility_trusted = accessibility::is_trusted();
+    append_paste_debug(&format!(
+        "paste_final_text accessibility_trusted={accessibility_trusted}"
+    ));
+    if !accessibility_trusted {
+        append_paste_debug("paste_final_text failed: accessibility missing");
         return Err(
             "Accessibility permission required for auto-paste. Open System Settings → Privacy & Security → Accessibility and enable Voicebox."
                 .into(),
         );
     }
 
-    focus_capture::activate_pid(focus.pid)?;
+    if let Err(err) = focus_capture::activate_pid(focus.pid) {
+        append_paste_debug(&format!("paste_final_text activate_pid failed: {err}"));
+        return Err(err);
+    }
     tokio::time::sleep(std::time::Duration::from_millis(POST_ACTIVATE_SETTLE_MS)).await;
 
-    let snapshot = clipboard::save_clipboard()?;
-    let after_write = clipboard::write_text(&text)?;
+    let snapshot = match clipboard::save_clipboard() {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            append_paste_debug(&format!("paste_final_text save_clipboard failed: {err}"));
+            return Err(err);
+        }
+    };
+    let after_write = match clipboard::write_text(&text) {
+        Ok(change_count) => {
+            append_paste_debug(&format!(
+                "paste_final_text clipboard_write change_count={change_count}"
+            ));
+            change_count
+        }
+        Err(err) => {
+            append_paste_debug(&format!("paste_final_text write_text failed: {err}"));
+            return Err(err);
+        }
+    };
 
     let paste_result = synthetic_keys::send_paste();
+    append_paste_debug(&format!("paste_final_text send_paste result={paste_result:?}"));
     tokio::time::sleep(std::time::Duration::from_millis(PASTE_CONSUME_MS)).await;
 
     let safe_to_restore = matches!(
@@ -1090,14 +1157,97 @@ async fn paste_final_text(
         Ok(current) if current == after_write
     );
     if safe_to_restore {
-        clipboard::restore_clipboard(&snapshot)?;
+        append_paste_debug("paste_final_text restoring clipboard");
+        if let Err(err) = clipboard::restore_clipboard(&snapshot) {
+            append_paste_debug(&format!("paste_final_text restore_clipboard failed: {err}"));
+            return Err(err);
+        }
     } else {
+        append_paste_debug("paste_final_text skip restore: clipboard changed");
         eprintln!(
             "[voicebox] clipboard mutated during paste window — skipping restore to preserve newer content"
         );
     }
 
-    paste_result?;
+    if let Err(err) = paste_result {
+        append_paste_debug(&format!("paste_final_text final paste error: {err}"));
+        return Err(err);
+    }
+    append_paste_debug("paste_final_text done");
+    Ok(true)
+}
+
+#[command]
+async fn paste_final_text_to_current(text: String) -> Result<bool, String> {
+    append_paste_debug(&format!(
+        "paste_final_text_to_current start len={}",
+        text.len()
+    ));
+    let accessibility_trusted = accessibility::is_trusted();
+    append_paste_debug(&format!(
+        "paste_final_text_to_current accessibility_trusted={accessibility_trusted}"
+    ));
+    if !accessibility_trusted {
+        append_paste_debug("paste_final_text_to_current failed: accessibility missing");
+        return Err(
+            "Accessibility permission required for auto-paste. Open System Settings → Privacy & Security → Accessibility and enable Voicebox."
+                .into(),
+        );
+    }
+
+    let snapshot = match clipboard::save_clipboard() {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            append_paste_debug(&format!(
+                "paste_final_text_to_current save_clipboard failed: {err}"
+            ));
+            return Err(err);
+        }
+    };
+    let after_write = match clipboard::write_text(&text) {
+        Ok(change_count) => {
+            append_paste_debug(&format!(
+                "paste_final_text_to_current clipboard_write change_count={change_count}"
+            ));
+            change_count
+        }
+        Err(err) => {
+            append_paste_debug(&format!(
+                "paste_final_text_to_current write_text failed: {err}"
+            ));
+            return Err(err);
+        }
+    };
+
+    let paste_result = synthetic_keys::send_paste();
+    append_paste_debug(&format!(
+        "paste_final_text_to_current send_paste result={paste_result:?}"
+    ));
+    tokio::time::sleep(std::time::Duration::from_millis(PASTE_CONSUME_MS)).await;
+
+    let safe_to_restore = matches!(
+        clipboard::current_change_count(),
+        Ok(current) if current == after_write
+    );
+    if safe_to_restore {
+        append_paste_debug("paste_final_text_to_current restoring clipboard");
+        if let Err(err) = clipboard::restore_clipboard(&snapshot) {
+            append_paste_debug(&format!(
+                "paste_final_text_to_current restore_clipboard failed: {err}"
+            ));
+            return Err(err);
+        }
+    } else {
+        append_paste_debug("paste_final_text_to_current skip restore: clipboard changed");
+    }
+
+    if let Err(err) = paste_result {
+        append_paste_debug(&format!(
+            "paste_final_text_to_current final paste error: {err}"
+        ));
+        return Err(err);
+    }
+    append_paste_debug("paste_final_text_to_current done");
     Ok(true)
 }
 
@@ -1365,6 +1515,7 @@ pub fn run() {
             stop_audio_playback,
             debug_clipboard_roundtrip,
             debug_paste_text,
+            debug_log_line,
             debug_capture_focus,
             debug_focus_roundtrip,
             check_accessibility_permission,
@@ -1372,6 +1523,7 @@ pub fn run() {
             open_accessibility_settings,
             open_input_monitoring_settings,
             paste_final_text,
+            paste_final_text_to_current,
             enable_hotkey,
             disable_hotkey,
             update_chord_bindings

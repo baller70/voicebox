@@ -13,6 +13,7 @@ import {
 import {
   canonicalKeyFromEvent,
   displayLabelForKey,
+  isValidChord,
   modifierSideHint,
   sortChordKeys,
 } from '@/lib/utils/keyCodes';
@@ -138,7 +139,7 @@ export function ChordPicker({
     ? sortChordKeys(Array.from(pressed))
     : captured;
 
-  const canSave = captured.length > 0;
+  const canSave = isValidChord(captured);
 
   return (
     <Dialog open={open} onOpenChange={(next) => { if (!next) onCancel(); }}>

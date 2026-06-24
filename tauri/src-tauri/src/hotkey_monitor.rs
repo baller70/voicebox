@@ -37,6 +37,17 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::focus_capture;
 use crate::DICTATE_WINDOW_LABEL;
 
+fn log_hotkey_debug(line: &str) {
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/voicebox-hotkey-debug.log")
+    {
+        let _ = writeln!(file, "{line}");
+    }
+}
+
 // ========================================================================
 // Public types
 // ========================================================================
@@ -115,8 +126,12 @@ impl HotkeyMonitor {
         }
 
         let matcher = match build_matcher(&bindings) {
-            Ok(m) => m,
+            Ok(m) => {
+                log_hotkey_debug("ChordMatcher built");
+                m
+            }
             Err(err) => {
+                log_hotkey_debug(&format!("ChordMatcher build failed: {err}"));
                 eprintln!(
                     "HotkeyMonitor: ChordMatcher build failed ({err}). Global chord detection is disabled. On macOS, grant Input Monitoring in System Settings → Privacy & Security → Input Monitoring and relaunch."
                 );
@@ -195,9 +210,11 @@ fn process_event(
 ) {
     match event {
         ChordEvent::Start { id, .. } => {
+            log_hotkey_debug(&format!("ChordEvent::Start {id:?}"));
             apply_effect(app, Effect::StartRecording(id));
         }
         ChordEvent::End { id: end_id, time: end_time } => {
+            log_hotkey_debug(&format!("ChordEvent::End {end_id:?}"));
             // Peek for an immediately-following Start. keytap emits
             // End+Start atomically (same Instant) when the held set
             // transitions between registered chords — our 5 ms window
@@ -237,7 +254,19 @@ fn apply_effect(app: &AppHandle, effect: Effect) {
             // reshuffle triggered by set_position / show could in principle
             // steal key focus and poison the reading. In practice those
             // calls leave keyWindow alone, but capturing first is free.
-            let focus = focus_capture::capture_focus().ok();
+            let focus = match focus_capture::capture_focus() {
+                Ok(snapshot) => {
+                    log_hotkey_debug(&format!(
+                        "capture_focus ok pid={} bundle={:?} role={:?}",
+                        snapshot.pid, snapshot.bundle_id, snapshot.role
+                    ));
+                    Some(snapshot)
+                }
+                Err(err) => {
+                    log_hotkey_debug(&format!("capture_focus failed: {err}"));
+                    None
+                }
+            };
 
             if let Some(window) = app.get_webview_window(DICTATE_WINDOW_LABEL) {
                 // The previous hide-cycle parked the window off-screen and

@@ -22,6 +22,7 @@ from ..database import Capture as DBCapture
 from ..models import CaptureResponse, RefinementFlagsModel
 from ..utils.audio import load_audio
 from .refinement import RefinementFlags, refine_transcript
+from . import groq_stt
 from .transcribe import get_whisper_model
 
 logger = logging.getLogger(__name__)
@@ -117,9 +118,13 @@ async def create_capture(
                 raw_path.unlink()
                 written_files.remove(raw_path)
 
-        whisper = get_whisper_model()
-        resolved_stt = stt_model or whisper.model_size
-        transcript = await whisper.transcribe(str(audio_path), language, resolved_stt)
+        if groq_stt.is_enabled():
+            resolved_stt = "groq-whisper-large-v3-turbo"
+            transcript = await groq_stt.transcribe_file(str(audio_path), language)
+        else:
+            whisper = get_whisper_model()
+            resolved_stt = stt_model or whisper.model_size
+            transcript = await whisper.transcribe(str(audio_path), language, resolved_stt)
 
         row = DBCapture(
             id=capture_id,
@@ -219,9 +224,13 @@ async def retranscribe_capture(
     if not resolved or not resolved.exists():
         raise FileNotFoundError(f"Audio for capture {capture_id} is missing")
 
-    whisper = get_whisper_model()
-    resolved_stt = stt_model or whisper.model_size
-    transcript = await whisper.transcribe(str(resolved), language, resolved_stt)
+    if groq_stt.is_enabled():
+        resolved_stt = "groq-whisper-large-v3-turbo"
+        transcript = await groq_stt.transcribe_file(str(resolved), language)
+    else:
+        whisper = get_whisper_model()
+        resolved_stt = stt_model or whisper.model_size
+        transcript = await whisper.transcribe(str(resolved), language, resolved_stt)
 
     row.transcript_raw = transcript
     row.stt_model = resolved_stt

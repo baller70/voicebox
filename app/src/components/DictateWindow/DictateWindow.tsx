@@ -43,20 +43,69 @@ export function DictateWindow() {
 
   const session = useCaptureRecordingSession({
     onFinalText: async (text, _capture, allowAutoPaste) => {
-      const focus = focusRef.current;
+      let focus = focusRef.current;
+      invoke('debug_log_line', {
+        line: `[dictate] onFinalText len=${text.length} allowAutoPaste=${allowAutoPaste} focus=${JSON.stringify(focus)}`,
+      }).catch(() => {});
       // Consume-once: a second chord before this fires would overwrite
       // focusRef, but nulling it here guards against the late-arriving
       // refine-result firing a paste after the user has moved on.
       focusRef.current = null;
-      if (!allowAutoPaste) return;
-      if (!focus || !text.trim()) return;
+      if (!allowAutoPaste) {
+        invoke('debug_log_line', { line: '[dictate] skip paste: allowAutoPaste=false' }).catch(
+          () => {},
+        );
+        return;
+      }
+      if (!focus && text.trim()) {
+        try {
+          focus = await invoke<FocusSnapshot>('debug_capture_focus');
+          invoke('debug_log_line', {
+            line: `[dictate] fallback focus=${JSON.stringify(focus)}`,
+          }).catch(() => {});
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          invoke('debug_log_line', { line: `[dictate] fallback focus failed ${msg}` }).catch(
+            () => {},
+          );
+        }
+      }
+      if (!focus || !text.trim()) {
+        if (!focus && text.trim()) {
+          try {
+            const didPaste = await invoke<boolean>('paste_final_text_to_current', { text });
+            invoke('debug_log_line', {
+              line: `[dictate] paste_final_text_to_current returned ${didPaste}`,
+            }).catch(() => {});
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            invoke('debug_log_line', {
+              line: `[dictate] paste_final_text_to_current error ${msg}`,
+            }).catch(() => {});
+            if (/accessibility/i.test(msg)) {
+              emit('system:accessibility-missing').catch(() => {});
+            }
+          }
+          return;
+        }
+        invoke('debug_log_line', {
+          line: `[dictate] skip paste: focus=${Boolean(focus)} hasText=${Boolean(text.trim())}`,
+        }).catch(() => {});
+        return;
+      }
       try {
-        await invoke('paste_final_text', { text, focus });
+        const didPaste = await invoke<boolean>('paste_final_text', { text, focus });
+        invoke('debug_log_line', { line: `[dictate] paste_final_text returned ${didPaste}` }).catch(
+          () => {},
+        );
       } catch (err) {
         // Surface accessibility failures to the main window so it can prompt
         // the user to grant permission. Other errors stay swallowed —
         // the transcription still landed in the captures list.
         const msg = err instanceof Error ? err.message : String(err);
+        invoke('debug_log_line', { line: `[dictate] paste_final_text error ${msg}` }).catch(
+          () => {},
+        );
         if (/accessibility/i.test(msg)) {
           emit('system:accessibility-missing').catch(() => {});
         }

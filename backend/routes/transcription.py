@@ -7,7 +7,7 @@ from pathlib import Path
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from .. import models
-from ..services import transcribe
+from ..services import groq_stt, transcribe
 from ..services.task_queue import create_background_task
 from ..utils.tasks import get_task_manager
 
@@ -34,6 +34,13 @@ async def transcribe_audio(
 
         audio, sr = await asyncio.to_thread(load_audio, tmp_path)
         duration = len(audio) / sr
+
+        if groq_stt.is_enabled():
+            text = await groq_stt.transcribe_file(tmp_path, language)
+            return models.TranscriptionResponse(
+                text=text,
+                duration=duration,
+            )
 
         whisper_model = transcribe.get_whisper_model()
         model_size = model if model else whisper_model.model_size

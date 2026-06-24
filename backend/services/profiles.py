@@ -73,6 +73,11 @@ def _get_preset_voice_ids(engine: str) -> set[str]:
 
         return {voice_id for voice_id, _name, _gender, _lang, _desc in QWEN_CUSTOM_VOICES}
 
+    if engine == "groq_tts":
+        from ..backends.groq_tts_backend import GROQ_TTS_VOICES
+
+        return {voice_id for voice_id, _name, _gender, _lang in GROQ_TTS_VOICES}
+
     return set()
 
 

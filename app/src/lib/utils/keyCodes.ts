@@ -144,6 +144,14 @@ export function modifierSideHint(name: string): 'L' | 'R' | null {
   return null;
 }
 
+export function isModifierKey(name: string): boolean {
+  return modifierSideHint(name) !== null || name === 'Function' || name === 'CapsLock';
+}
+
+export function isValidChord(keys: string[]): boolean {
+  return keys.length > 0 && keys.some((key) => !isModifierKey(key));
+}
+
 /**
  * Sort a chord's keys so the kbd pills always render in a predictable
  * order: modifiers first (Ctrl, Opt, Shift, Cmd), main key last. Matches

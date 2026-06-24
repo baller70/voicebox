@@ -215,6 +215,7 @@ TTS_ENGINES = {
     "chatterbox_turbo": "Chatterbox Turbo",
     "tada": "TADA",
     "kokoro": "Kokoro",
+    "groq_tts": "Groq TTS",
 }
 
 LLM_ENGINES = {
@@ -363,6 +364,15 @@ def _get_non_qwen_tts_configs() -> list[ModelConfig]:
             hf_repo_id="hexgrad/Kokoro-82M",
             size_mb=350,
             languages=["en", "es", "fr", "hi", "it", "pt", "ja", "zh"],
+        ),
+        ModelConfig(
+            model_name="groq-tts",
+            display_name="Groq TTS (Hosted)",
+            engine="groq_tts",
+            hf_repo_id="groq/canopylabs-orpheus",
+            size_mb=0,
+            supports_instruct=True,
+            languages=["en", "ar"],
         ),
     ]
 
@@ -704,6 +714,10 @@ def get_tts_backend_for_engine(engine: str) -> TTSBackend:
             from .kokoro_backend import KokoroTTSBackend
 
             backend = KokoroTTSBackend()
+        elif engine == "groq_tts":
+            from .groq_tts_backend import GroqTTSBackend
+
+            backend = GroqTTSBackend()
         elif engine == "qwen_custom_voice":
             from .qwen_custom_voice_backend import QwenCustomVoiceBackend
 

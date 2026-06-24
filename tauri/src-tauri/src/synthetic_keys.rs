@@ -199,7 +199,17 @@ pub fn send_paste() -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+pub fn send_paste_to_pid(_pid: i32) -> Result<(), String> {
+    send_paste()
+}
+
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn send_paste() -> Result<(), String> {
     Err("synthetic paste is not yet implemented on this platform".into())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn send_paste_to_pid(_pid: i32) -> Result<(), String> {
+    send_paste()
 }

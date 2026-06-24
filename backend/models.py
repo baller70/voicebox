@@ -2,7 +2,7 @@
 Pydantic models for request/response validation.
 """
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List
 from datetime import datetime
 
@@ -10,6 +10,28 @@ from .utils.capture_chords import (
     default_push_to_talk_chord,
     default_toggle_to_talk_chord,
 )
+
+
+MODIFIER_CHORD_KEYS = {
+    "MetaLeft",
+    "MetaRight",
+    "Alt",
+    "AltGr",
+    "ControlLeft",
+    "ControlRight",
+    "ShiftLeft",
+    "ShiftRight",
+    "Function",
+    "CapsLock",
+}
+
+
+def validate_chord_has_action_key(keys: Optional[List[str]]) -> Optional[List[str]]:
+    if keys is None:
+        return keys
+    if not any(key not in MODIFIER_CHORD_KEYS for key in keys):
+        raise ValueError("Shortcut must include a non-modifier key")
+    return keys
 
 
 class VoiceProfileCreate(BaseModel):
@@ -85,7 +107,7 @@ class GenerationRequest(BaseModel):
     seed: Optional[int] = Field(None, ge=0)
     model_size: Optional[str] = Field(default="1.7B", pattern="^(1\\.7B|0\\.6B|1B|3B)$")
     instruct: Optional[str] = Field(None, max_length=500)
-    engine: Optional[str] = Field(default="qwen", pattern="^(qwen|qwen_custom_voice|luxtts|chatterbox|chatterbox_turbo|tada|kokoro)$")
+    engine: Optional[str] = Field(default="qwen", pattern="^(qwen|qwen_custom_voice|luxtts|chatterbox|chatterbox_turbo|tada|kokoro|groq_tts)$")
     personality: bool = Field(
         default=False,
         description="When true and the profile has a personality prompt, the input text is rewritten in-character before TTS.",
@@ -284,6 +306,11 @@ class CaptureSettingsUpdate(BaseModel):
     hotkey_enabled: Optional[bool] = None
     chord_push_to_talk_keys: Optional[List[str]] = Field(default=None, min_length=1, max_length=6)
     chord_toggle_to_talk_keys: Optional[List[str]] = Field(default=None, min_length=1, max_length=6)
+
+    @field_validator("chord_push_to_talk_keys", "chord_toggle_to_talk_keys")
+    @classmethod
+    def validate_chord_keys(cls, keys: Optional[List[str]]) -> Optional[List[str]]:
+        return validate_chord_has_action_key(keys)
 
 
 class GenerationSettingsResponse(BaseModel):

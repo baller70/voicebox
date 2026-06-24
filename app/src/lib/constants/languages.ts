@@ -6,6 +6,7 @@
  * Chatterbox Multilingual supports 23 languages.
  * Chatterbox Turbo is English-only.
  * Kokoro supports 8 languages.
+ * Groq TTS supports English and Arabic.
  */
 
 /** All languages that any engine supports. */
@@ -69,6 +70,7 @@ export const ENGINE_LANGUAGES: Record<string, readonly LanguageCode[]> = {
   chatterbox_turbo: ['en'],
   tada: ['en', 'ar', 'zh', 'de', 'es', 'fr', 'it', 'ja', 'pl', 'pt'],
   kokoro: ['en', 'es', 'fr', 'hi', 'it', 'pt', 'ja', 'zh'],
+  groq_tts: ['en', 'ar'],
   qwen_custom_voice: ['zh', 'en', 'ja', 'ko', 'de', 'fr', 'ru', 'pt', 'es', 'it'],
 } as const;
 
