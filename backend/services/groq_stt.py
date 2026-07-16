@@ -10,7 +10,6 @@ import asyncio
 import json
 import mimetypes
 import os
-import subprocess
 import tempfile
 import threading
 import time
@@ -21,6 +20,7 @@ import httpx
 import soundfile as sf
 
 from ..utils.audio import load_audio
+from .groq_keys import describe_key, ordered_api_keys, should_rotate_http_status
 
 GROQ_STT_MODEL = os.environ.get("VOICEBOX_GROQ_STT_MODEL", "whisper-large-v3-turbo")
 GROQ_STT_MAX_DIRECT_BYTES = int(os.environ.get("VOICEBOX_GROQ_STT_MAX_DIRECT_BYTES", "18000000"))
@@ -43,23 +43,22 @@ async def transcribe_file(path: str, language: Optional[str] = None) -> str:
 
 
 def _transcribe_file_sync(path: str, language: Optional[str]) -> str:
-    api_key = _get_api_key()
     audio_path = Path(path)
     if not audio_path.exists():
         raise FileNotFoundError(f"Audio file not found: {path}")
 
     if audio_path.stat().st_size > GROQ_STT_MAX_DIRECT_BYTES:
-        return _transcribe_file_in_chunks(api_key, audio_path, language)
+        return _transcribe_file_in_chunks(audio_path, language)
 
     try:
-        return _transcribe_file_once(api_key, audio_path, language)
+        return _transcribe_file_once(audio_path, language)
     except RuntimeError as e:
         if _is_payload_too_large(e):
-            return _transcribe_file_in_chunks(api_key, audio_path, language)
+            return _transcribe_file_in_chunks(audio_path, language)
         raise
 
 
-def _transcribe_file_once(api_key: str, audio_path: Path, language: Optional[str]) -> str:
+def _transcribe_file_once(audio_path: Path, language: Optional[str]) -> str:
     if not audio_path.exists():
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
@@ -71,37 +70,42 @@ def _transcribe_file_once(api_key: str, audio_path: Path, language: Optional[str
         data["language"] = language
 
     payload = None
-    for attempt in range(1, GROQ_STT_ATTEMPTS + 1):
-        try:
-            with audio_path.open("rb") as audio_file:
-                response = _get_client().post(
-                    GROQ_STT_URL,
-                    data=data,
-                    files={
-                        "file": (
-                            audio_path.name,
-                            audio_file,
-                            mimetypes.guess_type(audio_path.name)[0] or "application/octet-stream",
-                        )
-                    },
-                    headers={"Authorization": f"Bearer {api_key}"},
+    last_error: Exception | None = None
+    for retry in range(1, GROQ_STT_ATTEMPTS + 1):
+        for api_key, key_position, key_total in ordered_api_keys():
+            try:
+                with audio_path.open("rb") as audio_file:
+                    response = _get_client().post(
+                        GROQ_STT_URL,
+                        data=data,
+                        files={
+                            "file": (
+                                audio_path.name,
+                                audio_file,
+                                mimetypes.guess_type(audio_path.name)[0] or "application/octet-stream",
+                            )
+                        },
+                        headers={"Authorization": f"Bearer {api_key}"},
+                    )
+                response.raise_for_status()
+                payload = response.json()
+                break
+            except httpx.HTTPStatusError as e:
+                last_error = RuntimeError(
+                    f"{describe_key(key_position, key_total)} failed: {_format_error(e.response.text)}"
                 )
-            response.raise_for_status()
-            payload = response.json()
+                if not should_rotate_http_status(e.response.status_code):
+                    raise RuntimeError(f"Groq STT request failed: {last_error}") from e
+            except (TimeoutError, httpx.TimeoutException, httpx.TransportError) as e:
+                _reset_client()
+                last_error = RuntimeError(f"{describe_key(key_position, key_total)} failed: {e}")
+        if payload is not None:
             break
-        except httpx.HTTPStatusError as e:
-            error = RuntimeError(f"Groq STT request failed: {_format_error(e.response.text)}")
-            if attempt >= GROQ_STT_ATTEMPTS or not _is_transient_http_status(e.response.status_code):
-                raise error from e
-        except (TimeoutError, httpx.TimeoutException, httpx.TransportError) as e:
-            _reset_client()
-            if attempt >= GROQ_STT_ATTEMPTS:
-                raise RuntimeError(f"Groq STT request failed after {attempt} attempts: {e}") from e
-
-        time.sleep(0.5 * attempt)
+        if retry < GROQ_STT_ATTEMPTS:
+            time.sleep(0.5 * retry)
 
     if payload is None:
-        raise RuntimeError("Groq STT request failed without a response")
+        raise RuntimeError(f"Groq STT request failed without a response: {last_error}")
 
     text = payload.get("text")
     if not isinstance(text, str):
@@ -109,11 +113,7 @@ def _transcribe_file_once(api_key: str, audio_path: Path, language: Optional[str
     return text.strip()
 
 
-def _is_transient_http_status(status: int) -> bool:
-    return status in {408, 425, 429} or status >= 500
-
-
-def _transcribe_file_in_chunks(api_key: str, audio_path: Path, language: Optional[str]) -> str:
+def _transcribe_file_in_chunks(audio_path: Path, language: Optional[str]) -> str:
     audio, sample_rate = load_audio(
         str(audio_path),
         sample_rate=GROQ_STT_CHUNK_SAMPLE_RATE,
@@ -130,7 +130,7 @@ def _transcribe_file_in_chunks(api_key: str, audio_path: Path, language: Optiona
                 continue
             chunk_path = tmp_root / f"{audio_path.stem}.part{idx:03d}.wav"
             sf.write(str(chunk_path), chunk, sample_rate, format="WAV", subtype="PCM_16")
-            text = _transcribe_file_once(api_key, chunk_path, language)
+            text = _transcribe_file_once(chunk_path, language)
             if text:
                 parts.append(text)
 
@@ -164,28 +164,6 @@ def _reset_client() -> None:
             client.close()
         except Exception:
             pass
-
-
-def _get_api_key() -> str:
-    api_key = os.environ.get("GROQ_API_KEY")
-    if api_key:
-        return api_key
-
-    try:
-        result = subprocess.run(
-            ["security", "find-generic-password", "-a", os.environ.get("USER", ""), "-s", "GROQ_API_KEY", "-w"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except Exception as e:
-        raise RuntimeError("GROQ_API_KEY is not set and was not found in macOS Keychain.") from e
-
-    api_key = result.stdout.strip()
-    if not api_key:
-        raise RuntimeError("GROQ_API_KEY is empty.")
-    return api_key
 
 
 def _format_error(body: str) -> str:

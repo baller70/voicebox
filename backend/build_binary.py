@@ -103,6 +103,8 @@ def build_server(cuda=False):
             "--hidden-import",
             "backend.services.transcribe",
             "--hidden-import",
+            "backend.services.groq_keys",
+            "--hidden-import",
             "backend.services.groq_stt",
             "--hidden-import",
             "backend.utils.platform_detect",

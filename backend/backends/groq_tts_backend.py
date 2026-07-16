@@ -7,7 +7,6 @@ there is no local model download and no reference-audio cloning.
 import asyncio
 import json
 import os
-import subprocess
 import tempfile
 import urllib.error
 import urllib.request
@@ -15,6 +14,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 
+from ..services.groq_keys import describe_key, ordered_api_keys, should_rotate_http_status
 from ..utils.audio import load_audio
 
 GROQ_TTS_MODEL_ENGLISH = "canopylabs/orpheus-v1-english"
@@ -88,7 +88,6 @@ class GroqTTSBackend:
         language: str,
         instruct: Optional[str],
     ) -> Tuple[np.ndarray, int]:
-        api_key = self._get_api_key()
         voice = self._resolve_voice(voice_prompt, language)
         model = GROQ_TTS_MODEL_ARABIC if _VOICE_LANG.get(voice) == "ar" or language == "ar" else GROQ_TTS_MODEL_ENGLISH
         input_text = self._apply_instruct(text, instruct)
@@ -102,23 +101,7 @@ class GroqTTSBackend:
             }
         ).encode("utf-8")
 
-        req = urllib.request.Request(
-            "https://api.groq.com/openai/v1/audio/speech",
-            data=payload,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "User-Agent": "VoiceBox-Groq-TTS/1.0",
-            },
-            method="POST",
-        )
-
-        try:
-            with urllib.request.urlopen(req, timeout=90) as response:
-                wav_bytes = response.read()
-        except urllib.error.HTTPError as e:
-            body = e.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"Groq TTS request failed: {self._format_error(body)}") from e
+        wav_bytes = self._post_speech_request(payload)
 
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             tmp.write(wav_bytes)
@@ -132,26 +115,32 @@ class GroqTTSBackend:
             except OSError:
                 pass
 
-    def _get_api_key(self) -> str:
-        api_key = os.environ.get("GROQ_API_KEY")
-        if api_key:
-            return api_key
-
-        try:
-            result = subprocess.run(
-                ["security", "find-generic-password", "-a", os.environ.get("USER", ""), "-s", "GROQ_API_KEY", "-w"],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=5,
+    def _post_speech_request(self, payload: bytes) -> bytes:
+        last_error: Exception | None = None
+        for api_key, key_position, key_total in ordered_api_keys():
+            req = urllib.request.Request(
+                "https://api.groq.com/openai/v1/audio/speech",
+                data=payload,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    "User-Agent": "VoiceBox-Groq-TTS/1.0",
+                },
+                method="POST",
             )
-        except Exception as e:
-            raise RuntimeError("GROQ_API_KEY is not set and was not found in macOS Keychain.") from e
-
-        api_key = result.stdout.strip()
-        if not api_key:
-            raise RuntimeError("GROQ_API_KEY is empty.")
-        return api_key
+            try:
+                with urllib.request.urlopen(req, timeout=90) as response:
+                    return response.read()
+            except urllib.error.HTTPError as e:
+                body = e.read().decode("utf-8", errors="replace")
+                last_error = RuntimeError(
+                    f"{describe_key(key_position, key_total)} failed: {self._format_error(body)}"
+                )
+                if not should_rotate_http_status(e.code):
+                    raise RuntimeError(f"Groq TTS request failed: {last_error}") from e
+            except urllib.error.URLError as e:
+                last_error = RuntimeError(f"{describe_key(key_position, key_total)} failed: {e}")
+        raise RuntimeError(f"Groq TTS request failed: {last_error}")
 
     def _resolve_voice(self, voice_prompt: dict, language: str) -> str:
         voice_id = voice_prompt.get("preset_voice_id") if isinstance(voice_prompt, dict) else None

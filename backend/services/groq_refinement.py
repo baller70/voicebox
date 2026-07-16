@@ -5,12 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import subprocess
 import threading
 import time
 
 import httpx
 
+from .groq_keys import describe_key, ordered_api_keys, should_rotate_http_status
 from .refinement import RefinementFlags, collapse_repetitive_artifacts
 
 
@@ -107,31 +107,32 @@ def _build_prompt_polish_system(flags: RefinementFlags) -> str:
 
 
 def _chat_completion(payload: dict) -> str:
-    api_key = _get_api_key()
     last_error: Exception | None = None
-    for attempt in range(1, GROQ_CHAT_ATTEMPTS + 1):
-        try:
-            response = _get_client().post(
-                GROQ_CHAT_URL,
-                json=payload,
-                headers={"Authorization": f"Bearer {api_key}"},
-            )
-            response.raise_for_status()
-            data = response.json()
-            content = data["choices"][0]["message"]["content"]
-            if not isinstance(content, str):
-                raise RuntimeError(f"Groq refinement response did not include text: {data!r}")
-            return content
-        except httpx.HTTPStatusError as e:
-            last_error = RuntimeError(_format_error(e.response.text))
-            if attempt >= GROQ_CHAT_ATTEMPTS or not _is_transient_http_status(e.response.status_code):
-                raise RuntimeError(f"Groq refinement failed: {last_error}") from e
-        except (TimeoutError, httpx.TimeoutException, httpx.TransportError) as e:
-            _reset_client()
-            last_error = e
-            if attempt >= GROQ_CHAT_ATTEMPTS:
-                raise RuntimeError(f"Groq refinement failed after {attempt} attempts: {e}") from e
-        time.sleep(0.5 * attempt)
+    for retry in range(1, GROQ_CHAT_ATTEMPTS + 1):
+        for api_key, key_position, key_total in ordered_api_keys():
+            try:
+                response = _get_client().post(
+                    GROQ_CHAT_URL,
+                    json=payload,
+                    headers={"Authorization": f"Bearer {api_key}"},
+                )
+                response.raise_for_status()
+                data = response.json()
+                content = data["choices"][0]["message"]["content"]
+                if not isinstance(content, str):
+                    raise RuntimeError(f"Groq refinement response did not include text: {data!r}")
+                return content
+            except httpx.HTTPStatusError as e:
+                last_error = RuntimeError(
+                    f"{describe_key(key_position, key_total)} failed: {_format_error(e.response.text)}"
+                )
+                if not should_rotate_http_status(e.response.status_code):
+                    raise RuntimeError(f"Groq refinement failed: {last_error}") from e
+            except (TimeoutError, httpx.TimeoutException, httpx.TransportError) as e:
+                _reset_client()
+                last_error = RuntimeError(f"{describe_key(key_position, key_total)} failed: {e}")
+        if retry < GROQ_CHAT_ATTEMPTS:
+            time.sleep(0.5 * retry)
     raise RuntimeError(f"Groq refinement failed: {last_error}")
 
 
@@ -182,38 +183,6 @@ def _reset_client() -> None:
             client.close()
         except Exception:
             pass
-
-
-def _get_api_key() -> str:
-    api_key = os.environ.get("GROQ_API_KEY")
-    if api_key:
-        return api_key
-    try:
-        result = subprocess.run(
-            [
-                "security",
-                "find-generic-password",
-                "-a",
-                os.environ.get("USER", ""),
-                "-s",
-                "GROQ_API_KEY",
-                "-w",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except Exception as e:
-        raise RuntimeError("GROQ_API_KEY is not set and was not found in macOS Keychain.") from e
-    api_key = result.stdout.strip()
-    if not api_key:
-        raise RuntimeError("GROQ_API_KEY is empty.")
-    return api_key
-
-
-def _is_transient_http_status(status: int) -> bool:
-    return status in {408, 425, 429} or status >= 500
 
 
 def _format_error(body: str) -> str:
