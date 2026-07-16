@@ -13,6 +13,18 @@ export const webAudio: PlatformAudio = {
     throw new Error('System audio capture is only available in the desktop app.');
   },
 
+  async isMicrophoneCaptureSupported(): Promise<boolean> {
+    return false;
+  },
+
+  async startMicrophoneCapture(_maxDurationSecs: number): Promise<void> {
+    throw new Error('Native microphone capture is only available in the desktop app.');
+  },
+
+  async stopMicrophoneCapture(): Promise<Blob> {
+    throw new Error('Native microphone capture is only available in the desktop app.');
+  },
+
   async listOutputDevices(): Promise<AudioDevice[]> {
     return []; // No native device routing in web
   },

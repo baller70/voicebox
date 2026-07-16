@@ -198,6 +198,7 @@ class CaptureSettings(Base):
     stt_model = Column(String, nullable=False, default="turbo")
     language = Column(String, nullable=False, default="auto")
     auto_refine = Column(Boolean, nullable=False, default=True)
+    refinement_provider = Column(String, nullable=False, default="groq")
     llm_model = Column(String, nullable=False, default="0.6B")
     smart_cleanup = Column(Boolean, nullable=False, default=True)
     self_correction = Column(Boolean, nullable=False, default=True)

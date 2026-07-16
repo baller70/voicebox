@@ -9,6 +9,7 @@ mod focus_capture;
 #[cfg(desktop)]
 mod hotkey_monitor;
 mod input_monitoring;
+mod microphone_capture;
 #[cfg(desktop)]
 mod key_codes;
 mod keyboard_layout;
@@ -36,6 +37,15 @@ fn log_hotkey_debug(line: &str) {
 pub const DICTATE_WINDOW_LABEL: &str = "dictate";
 const DICTATE_WINDOW_WIDTH: f64 = 420.0;
 const DICTATE_WINDOW_HEIGHT: f64 = 64.0;
+
+#[cfg(desktop)]
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
 
 /// Create the floating dictate webview hidden. The HotkeyMonitor shows it on
 /// chord-start; the frontend hides it when the capture pipeline finishes.
@@ -472,8 +482,18 @@ async fn start_server(
     let parent_pid_str = std::process::id().to_string();
     let is_remote = remote.unwrap_or(false);
 
-    // Resolve the custom models directory from the parameter or stored state
-    let effective_models_dir = models_dir.or_else(|| state.models_dir.lock().unwrap().clone());
+    // Resolve the custom models directory from the parameter or stored state.
+    // If the app data directory is symlinked to an external Voicebox data
+    // volume, keep using its sibling `Models` directory automatically. This
+    // prevents a restart from silently falling back to an empty home cache.
+    let external_models_dir = std::fs::canonicalize(&data_dir)
+        .ok()
+        .and_then(|resolved_data_dir| resolved_data_dir.parent().map(|parent| parent.join("Models")))
+        .filter(|path| path.is_dir())
+        .and_then(|path| path.to_str().map(ToOwned::to_owned));
+    let effective_models_dir = models_dir
+        .or_else(|| state.models_dir.lock().unwrap().clone())
+        .or(external_models_dir);
     if let Some(ref dir) = effective_models_dir {
         println!("Custom models directory: {}", dir);
     }
@@ -487,6 +507,9 @@ async fn start_server(
         let mut cmd = app.shell().command(cuda_path.to_str().unwrap());
         cmd = cmd.current_dir(cuda_dir);
         cmd = cmd.args(["--data-dir", &data_dir_str, "--port", &port_str, "--parent-pid", &parent_pid_str]);
+        cmd = cmd
+            .env("VOICEBOX_GROQ_STT_ATTEMPTS", "1")
+            .env("VOICEBOX_GROQ_STT_TIMEOUT_SECONDS", "5");
         if is_remote {
             cmd = cmd.args(["--host", "0.0.0.0"]);
         }
@@ -497,6 +520,9 @@ async fn start_server(
     } else {
         // Use the bundled CPU sidecar
         sidecar = sidecar.args(["--data-dir", &data_dir_str, "--port", &port_str, "--parent-pid", &parent_pid_str]);
+        sidecar = sidecar
+            .env("VOICEBOX_GROQ_STT_ATTEMPTS", "1")
+            .env("VOICEBOX_GROQ_STT_TIMEOUT_SECONDS", "5");
         if is_remote {
             sidecar = sidecar.args(["--host", "0.0.0.0"]);
         }
@@ -696,6 +722,18 @@ async fn start_server(
                 _ => {}
             }
         }
+
+        // An intentional stop removes server_pid before the sidecar exits.
+        // If this PID is still current, the sidecar died unexpectedly: clear
+        // stale state and let the frontend start a fresh managed process.
+        let state = app_handle.state::<ServerState>();
+        let is_current = state.server_pid.lock().unwrap().as_ref() == Some(&process_pid);
+        if is_current {
+            state.server_pid.lock().unwrap().take();
+            state.child.lock().unwrap().take();
+            eprintln!("Server process {} exited unexpectedly; requesting restart", process_pid);
+            let _ = app_handle.emit("server-exited", ());
+        }
     });
 
     Ok(format!("http://127.0.0.1:{}", SERVER_PORT))
@@ -792,6 +830,52 @@ async fn start_system_audio_capture(
     max_duration_secs: u32,
 ) -> Result<(), String> {
     audio_capture::start_capture(&state, max_duration_secs).await
+}
+
+#[command]
+async fn start_microphone_capture(
+    state: State<'_, microphone_capture::MicrophoneCaptureState>,
+    max_duration_secs: u32,
+) -> Result<(), String> {
+    match microphone_capture::start_capture(&state, max_duration_secs).await {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            log_hotkey_debug(&format!("microphone_capture start failed: {err}"));
+            Err(err)
+        }
+    }
+}
+
+#[command]
+async fn stop_microphone_capture(
+    state: State<'_, microphone_capture::MicrophoneCaptureState>,
+) -> Result<String, String> {
+    match microphone_capture::stop_capture(&state).await {
+        Ok(wav) => Ok(wav),
+        Err(err) => {
+            log_hotkey_debug(&format!("microphone_capture stop failed: {err}"));
+            Err(err)
+        }
+    }
+}
+
+#[command]
+async fn read_microphone_capture_chunk(
+    state: State<'_, microphone_capture::MicrophoneCaptureState>,
+    min_duration_ms: u32,
+) -> Result<Option<String>, String> {
+    match microphone_capture::read_chunk(&state, min_duration_ms).await {
+        Ok(chunk) => Ok(chunk),
+        Err(err) => {
+            log_hotkey_debug(&format!("microphone_capture chunk failed: {err}"));
+            Err(err)
+        }
+    }
+}
+
+#[command]
+fn is_microphone_capture_supported() -> bool {
+    microphone_capture::is_supported()
 }
 
 #[command]
@@ -990,7 +1074,10 @@ fn spawn_hotkey_auto_arm(app: tauri::AppHandle) {
                 }
             };
 
-            for attempt in 1..=90 {
+            // MLX/Whisper imports can take more than a minute on a cold
+            // launch. Keep retrying long enough for the backend to become
+            // healthy so a loaded UI cannot silently lose its global chord.
+            for attempt in 1..=360 {
                 if !check_health(SERVER_PORT) {
                     std::thread::sleep(Duration::from_millis(500));
                     continue;
@@ -1458,6 +1545,7 @@ pub fn run() {
             models_dir: Mutex::new(None),
         })
         .manage(audio_capture::AudioCaptureState::new())
+        .manage(microphone_capture::MicrophoneCaptureState::new())
         .manage(audio_output::AudioOutputState::new())
         .setup(|app| {
             #[cfg(desktop)]
@@ -1577,6 +1665,10 @@ pub fn run() {
             start_system_audio_capture,
             stop_system_audio_capture,
             is_system_audio_supported,
+            start_microphone_capture,
+            stop_microphone_capture,
+            read_microphone_capture_chunk,
+            is_microphone_capture_supported,
             list_audio_output_devices,
             play_audio_to_devices,
             stop_audio_playback,
@@ -1599,6 +1691,13 @@ pub fn run() {
             let closing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             move |window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
+                #[cfg(target_os = "macos")]
+                if window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                    return;
+                }
+
                 // If we're already in the close flow, let it proceed
                 if closing.load(std::sync::atomic::Ordering::SeqCst) {
                     return;
@@ -1711,6 +1810,10 @@ pub fn run() {
                     println!("RunEvent::ExitRequested received");
                     // Don't prevent exit, just log it
                     let _ = api;
+                }
+                #[cfg(target_os = "macos")]
+                RunEvent::Reopen { .. } => {
+                    show_main_window(app);
                 }
                 _ => {}
             }

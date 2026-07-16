@@ -32,6 +32,11 @@ class WebLifecycle implements PlatformLifecycle {
     // No-op for web - server logs are not available
     return () => {};
   }
+
+  subscribeToServerExit(_callback: () => void): () => void {
+    // No-op for web - the server is managed externally
+    return () => {};
+  }
 }
 
 export const webLifecycle = new WebLifecycle();

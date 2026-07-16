@@ -27,6 +27,7 @@ async def create_capture_endpoint(
     source: str = Form("file"),
     language: str | None = Form(None),
     stt_model: str | None = Form(None),
+    transcript_raw: str | None = Form(None),
     db: Session = Depends(get_db),
 ):
     """Upload audio, run STT, persist the capture."""
@@ -52,6 +53,7 @@ async def create_capture_endpoint(
             source=source,
             language=resolved_language,
             stt_model=resolved_stt,
+            transcript_raw=transcript_raw,
             db=db,
         )
     except ValueError as e:
@@ -137,6 +139,7 @@ async def refine_capture_endpoint(
             preserve_technical=saved.preserve_technical,
         )
 
+    resolved_provider = request.provider or saved.refinement_provider
     resolved_model = request.model_size or saved.llm_model
 
     try:
@@ -144,6 +147,7 @@ async def refine_capture_endpoint(
             capture_id=capture_id,
             flags=flags,
             model_size=resolved_model,
+            provider=resolved_provider,
             db=db,
         )
     except Exception as e:
@@ -170,12 +174,14 @@ async def capture_readiness_endpoint(db: Session = Depends(get_db)):
         (c for c in get_stt_model_configs() if c.model_size == saved.stt_model),
         None,
     )
-    llm_cfg = next(
-        (c for c in get_llm_model_configs() if c.model_size == saved.llm_model),
-        None,
-    )
+    llm_cfg = None
+    if saved.refinement_provider != "groq":
+        llm_cfg = next(
+            (c for c in get_llm_model_configs() if c.model_size == saved.llm_model),
+            None,
+        )
 
-    if stt_cfg is None or llm_cfg is None:
+    if stt_cfg is None or (saved.refinement_provider != "groq" and llm_cfg is None):
         # Should be impossible — both fields are pattern-validated against
         # known sizes — but bail loudly rather than return half a response.
         raise HTTPException(
@@ -192,11 +198,11 @@ async def capture_readiness_endpoint(db: Session = Depends(get_db)):
             size_mb=stt_cfg.size_mb or None,
         ),
         llm=models.ModelReadiness(
-            ready=is_model_cached(llm_cfg.hf_repo_id),
-            model_name=llm_cfg.model_name,
-            display_name=llm_cfg.display_name,
-            size=llm_cfg.model_size,
-            size_mb=llm_cfg.size_mb or None,
+            ready=True if saved.refinement_provider == "groq" else is_model_cached(llm_cfg.hf_repo_id),
+            model_name="groq-refinement" if saved.refinement_provider == "groq" else llm_cfg.model_name,
+            display_name="Groq Prompt Polish" if saved.refinement_provider == "groq" else llm_cfg.display_name,
+            size="cloud" if saved.refinement_provider == "groq" else llm_cfg.model_size,
+            size_mb=None if saved.refinement_provider == "groq" else llm_cfg.size_mb or None,
         ),
     )
 

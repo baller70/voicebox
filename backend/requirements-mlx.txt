@@ -2,6 +2,7 @@
 # These should only be installed on aarch64-apple-darwin platforms
 
 mlx>=0.30.0
+mlx-lm==0.31.1
 
 # miniaudio is a runtime dep of mlx-audio's STT path (mlx_audio.stt).
 # mlx-audio itself is installed --no-deps (see comment below), so we

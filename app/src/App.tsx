@@ -94,6 +94,7 @@ function MainApp() {
   const [startupError, setStartupError] = useState<string | null>(null);
   const [loadingMessageIndex, setLoadingMessageIndex] = useState(0);
   const serverStartingRef = useRef(false);
+  const serverRecoveringRef = useRef(false);
 
   // Automatically check for app updates on startup and show toast notifications
   useAutoUpdater({ checkOnMount: true, showToast: true });
@@ -130,6 +131,34 @@ function MainApp() {
     });
     return unsubscribe;
   }, [platform.lifecycle]);
+
+  // The desktop window can outlive its Python sidecar. Recover the sidecar
+  // automatically so hotkey dictation does not get stuck on "Load failed".
+  useEffect(() => {
+    return platform.lifecycle.subscribeToServerExit(() => {
+      if (!platform.metadata.isTauri || serverRecoveringRef.current) return;
+
+      serverRecoveringRef.current = true;
+      setServerReady(false);
+      setStartupError(null);
+
+      const state = useServerStore.getState();
+      platform.lifecycle
+        .startServer(state.mode === 'remote', state.customModelsDir)
+        .then((serverUrl) => {
+          useServerStore.getState().setServerUrl(serverUrl);
+          window.__voiceboxServerStartedByApp = true;
+          setServerReady(true);
+        })
+        .catch((error) => {
+          window.__voiceboxServerStartedByApp = false;
+          setStartupError(error instanceof Error ? error.message : String(error));
+        })
+        .finally(() => {
+          serverRecoveringRef.current = false;
+        });
+    });
+  }, [platform.lifecycle, platform.metadata.isTauri]);
 
   // Setup window close handler and auto-start server when running in Tauri (production only)
   useEffect(() => {

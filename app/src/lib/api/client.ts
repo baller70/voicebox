@@ -439,6 +439,7 @@ class ApiClient {
       source?: CaptureSource;
       language?: LanguageCode;
       sttModel?: WhisperModelSize;
+      transcriptRaw?: string;
     },
   ): Promise<CaptureCreateResponse> {
     const formData = new FormData();
@@ -446,6 +447,7 @@ class ApiClient {
     formData.append('source', options?.source ?? 'file');
     if (options?.language) formData.append('language', options.language);
     if (options?.sttModel) formData.append('stt_model', options.sttModel);
+    if (options?.transcriptRaw) formData.append('transcript_raw', options.transcriptRaw);
 
     const url = `${this.getBaseUrl()}/captures`;
     const response = await fetch(url, { method: 'POST', body: formData });

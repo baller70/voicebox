@@ -31,6 +31,7 @@ scopeguard = "1.2.0"
 screencapturekit = { version = "1", features = ["async"] }
 coreaudio-sys = "0.2"
 objc = "0.2"
+block2 = "0.6.2"
 core-foundation-sys = "0.8"
 
 [target.'cfg(target_os = "windows")'.dependencies]

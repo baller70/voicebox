@@ -242,6 +242,7 @@ class CaptureRefineRequest(BaseModel):
 
     flags: Optional[RefinementFlagsModel] = None
     model_size: Optional[str] = Field(default=None, pattern="^(0\\.6B|1\\.7B|4B)$")
+    provider: Optional[str] = Field(default=None, pattern="^(local|groq)$")
 
 
 class CaptureRetranscribeRequest(BaseModel):
@@ -257,6 +258,7 @@ class CaptureSettingsResponse(BaseModel):
     stt_model: str = Field(default="turbo", pattern="^(base|small|medium|large|turbo)$")
     language: str = Field(default="auto")
     auto_refine: bool = True
+    refinement_provider: str = Field(default="groq", pattern="^(local|groq)$")
     llm_model: str = Field(default="0.6B", pattern="^(0\\.6B|1\\.7B|4B)$")
     smart_cleanup: bool = True
     self_correction: bool = True
@@ -281,6 +283,7 @@ class CaptureSettingsUpdate(BaseModel):
     stt_model: Optional[str] = Field(default=None, pattern="^(base|small|medium|large|turbo)$")
     language: Optional[str] = None
     auto_refine: Optional[bool] = None
+    refinement_provider: Optional[str] = Field(default=None, pattern="^(local|groq)$")
     llm_model: Optional[str] = Field(default=None, pattern="^(0\\.6B|1\\.7B|4B)$")
     smart_cleanup: Optional[bool] = None
     self_correction: Optional[bool] = None

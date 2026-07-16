@@ -5,6 +5,7 @@ import { Visualizer } from 'react-sound-visualizer';
 import { Button } from '@/components/ui/button';
 import { FormControl, FormItem, FormMessage } from '@/components/ui/form';
 import { formatAudioDuration } from '@/lib/utils/audio';
+import { usePlatform } from '@/platform/PlatformContext';
 
 const MemoizedWaveform = memo(function MemoizedWaveform({
   audioStream,
@@ -50,17 +51,20 @@ export function AudioSampleRecording({
   showWaveform = true,
 }: AudioSampleRecordingProps) {
   const { t } = useTranslation();
+  const platform = usePlatform();
   const [audioStream, setAudioStream] = useState<MediaStream | null>(null);
 
   // Request microphone access when component mounts
   useEffect(() => {
-    if (!showWaveform) return;
+    if (!showWaveform || platform.metadata.isTauri) return;
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
 
     let stream: MediaStream | null = null;
 
     navigator.mediaDevices
-      .getUserMedia({ audio: true, video: false })
+      // Keep the request to the boolean form supported by older WKWebView
+      // builds. Some versions reject otherwise valid constraint dictionaries.
+      .getUserMedia({ audio: true })
       .then((s) => {
         stream = s;
         setAudioStream(s);
@@ -76,7 +80,7 @@ export function AudioSampleRecording({
         });
       }
     };
-  }, [showWaveform]);
+  }, [platform.metadata.isTauri, showWaveform]);
 
   return (
     <FormItem>

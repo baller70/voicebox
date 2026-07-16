@@ -31,7 +31,12 @@ import { usePlatform } from '@/platform/PlatformContext';
 import { useServerStore } from '@/stores/serverStore';
 import { cn } from '@/lib/utils/cn';
 import { defaultChordKeys, displayLabelForKey, modifierSideHint } from '@/lib/utils/keyCodes';
-import type { Qwen3ModelSize, VoiceProfileResponse, WhisperModelSize } from '@/lib/api/types';
+import type {
+  Qwen3ModelSize,
+  RefinementProvider,
+  VoiceProfileResponse,
+  WhisperModelSize,
+} from '@/lib/api/types';
 import { SettingRow, SettingSection } from './SettingRow';
 
 function ChordPreview({ keys }: { keys: string[] }) {
@@ -131,6 +136,7 @@ export function CapturesPage() {
   const sttModel = settings?.stt_model ?? 'turbo';
   const language = settings?.language ?? 'auto';
   const autoRefine = settings?.auto_refine ?? true;
+  const refinementProvider = settings?.refinement_provider ?? 'groq';
   const llmModel = settings?.llm_model ?? '0.6B';
   const smartCleanup = settings?.smart_cleanup ?? true;
   const selfCorrection = settings?.self_correction ?? true;
@@ -386,6 +392,31 @@ export function CapturesPage() {
         />
 
         <SettingRow
+          title={t('settings.captures.refinement.provider.title')}
+          description={t('settings.captures.refinement.provider.description')}
+          action={
+            <Select
+              value={refinementProvider}
+              onValueChange={(v) => update({ refinement_provider: v as RefinementProvider })}
+              disabled={!autoRefine}
+            >
+              <SelectTrigger className="w-[260px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="groq">
+                  {t('settings.captures.refinement.provider.groq')}
+                </SelectItem>
+                <SelectItem value="local">
+                  {t('settings.captures.refinement.provider.local')}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+          }
+        />
+
+        {refinementProvider === 'local' ? (
+        <SettingRow
           title={t('settings.captures.refinement.model.title')}
           description={t('settings.captures.refinement.model.description')}
           action={
@@ -411,6 +442,7 @@ export function CapturesPage() {
             </Select>
           }
         />
+        ) : null}
 
         <SettingRow
           title={t('settings.captures.refinement.smartCleanup.title')}

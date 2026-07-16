@@ -23,6 +23,7 @@ from ..models import CaptureResponse, RefinementFlagsModel
 from ..utils.audio import load_audio
 from .refinement import RefinementFlags, refine_transcript
 from . import groq_stt
+from .dictation_text import polish_dictation_text
 from .transcribe import get_whisper_model
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,17 @@ TRANSCRIPTION_FAILED_PREFIX = "[Transcription failed:"
 # this set has to go through librosa for decode + a soundfile transcode
 # before whisper sees it.
 WHISPER_NATIVE_FORMATS = (".wav", ".mp3", ".flac", ".ogg")
+
+
+def _read_duration_ms(audio_path: Path) -> int | None:
+    """Read duration from container metadata without decoding the waveform."""
+    try:
+        info = sf.info(str(audio_path))
+    except Exception:
+        return None
+    if info.samplerate <= 0:
+        return None
+    return int((info.frames / info.samplerate) * 1000)
 
 
 def _to_response(row: DBCapture) -> CaptureResponse:
@@ -68,6 +80,38 @@ def is_transcription_failed_text(text: str | None) -> bool:
     return bool(text and text.startswith(TRANSCRIPTION_FAILED_PREFIX))
 
 
+async def _transcribe_with_fallback(
+    audio_path: Path,
+    language: Optional[str],
+    stt_model: Optional[str],
+) -> tuple[str, str]:
+    """Prefer Groq STT, with the selected local Whisper model as fallback."""
+    groq_error: Exception | None = None
+    if groq_stt.is_enabled():
+        try:
+            transcript = await groq_stt.transcribe_file(str(audio_path), language)
+            return transcript, "groq-whisper-large-v3-turbo"
+        except Exception as exc:
+            groq_error = exc
+            logger.warning(
+                "Groq STT failed; falling back to local Whisper for %s: %s",
+                audio_path.name,
+                exc,
+            )
+
+    whisper = get_whisper_model()
+    resolved_stt = stt_model or whisper.model_size
+    try:
+        transcript = await whisper.transcribe(str(audio_path), language, resolved_stt)
+        return transcript, resolved_stt
+    except Exception as local_error:
+        if groq_error is not None:
+            raise RuntimeError(
+                f"Groq STT failed: {groq_error}; local Whisper fallback failed: {local_error}"
+            ) from local_error
+        raise
+
+
 async def create_capture(
     *,
     audio_bytes: bytes,
@@ -75,6 +119,7 @@ async def create_capture(
     source: str,
     language: Optional[str],
     stt_model: Optional[str],
+    transcript_raw: Optional[str] = None,
     db: Session,
 ) -> CaptureResponse:
     """Persist raw audio, run STT, store the row."""
@@ -93,34 +138,29 @@ async def create_capture(
         raw_path.write_bytes(audio_bytes)
         written_files.append(raw_path)
 
-        # Decode once with librosa — its audioread fallback handles webm/opus
-        # via ffmpeg, which miniaudio (used inside mlx-audio's whisper) can't.
-        # The decoded array gives us an accurate duration and becomes the
-        # canonical WAV we hand to whisper.
-        try:
-            audio, sr = load_audio(str(raw_path))
-            duration_ms = int((len(audio) / sr) * 1000) if sr else None
-        except Exception as decode_err:
-            logger.warning(
-                "Could not decode capture %s (%s): %r", capture_id, suffix, decode_err
-            )
-            audio, sr = None, None
-            duration_ms = None
+        duration_ms = _read_duration_ms(raw_path)
 
-        if audio is None or sr is None:
-            # Decode failed. Only pass the file straight to whisper if the
-            # source is a format its miniaudio loader can still read — webm,
-            # m4a, etc. would just 500 later. Surface a clean error instead.
-            if suffix not in WHISPER_NATIVE_FORMATS:
-                raise ValueError(
-                    f"Could not decode {suffix} audio — the recording may be empty or corrupt"
-                )
-            audio_path = raw_path
-        elif suffix == ".wav":
+        if suffix in WHISPER_NATIVE_FORMATS:
+            # Native dictation arrives as WAV. Do not decode the entire file
+            # before Groq STT; metadata is enough for duration, and local
+            # Whisper can consume these formats directly if fallback is needed.
             audio_path = raw_path
         else:
-            # Transcode to WAV so downstream loaders (miniaudio, soundfile) work
-            # regardless of what format the client shipped.
+            # Decode once with librosa — its audioread fallback handles webm/opus
+            # via ffmpeg, which miniaudio (used inside mlx-audio's whisper) can't.
+            # The decoded array gives us duration and becomes the canonical WAV
+            # for local fallback.
+            try:
+                audio, sr = load_audio(str(raw_path))
+                duration_ms = int((len(audio) / sr) * 1000) if sr else duration_ms
+            except Exception as decode_err:
+                logger.warning(
+                    "Could not decode capture %s (%s): %r", capture_id, suffix, decode_err
+                )
+                raise ValueError(
+                    f"Could not decode {suffix} audio — the recording may be empty or corrupt"
+                ) from decode_err
+
             audio_path = config.get_captures_dir() / f"{capture_id}.wav"
             sf.write(str(audio_path), audio, sr, format="WAV")
             written_files.append(audio_path)
@@ -128,21 +168,20 @@ async def create_capture(
                 raw_path.unlink()
                 written_files.remove(raw_path)
 
-        use_groq = groq_stt.is_enabled()
-        if use_groq:
-            resolved_stt = "groq-whisper-large-v3-turbo"
+        precomputed_transcript = (transcript_raw or "").strip()
+        if precomputed_transcript:
+            transcript = polish_dictation_text(precomputed_transcript)
+            resolved_stt = "progressive-groq-whisper-large-v3-turbo"
         else:
-            whisper = get_whisper_model()
-            resolved_stt = stt_model or whisper.model_size
-
-        try:
-            if use_groq:
-                transcript = await groq_stt.transcribe_file(str(audio_path), language)
-            else:
-                transcript = await whisper.transcribe(str(audio_path), language, resolved_stt)
-        except Exception as transcribe_err:
-            logger.exception("Transcription failed for capture %s", capture_id)
-            transcript = failed_transcript(transcribe_err)
+            try:
+                transcript, resolved_stt = await _transcribe_with_fallback(
+                    audio_path, language, stt_model
+                )
+                transcript = polish_dictation_text(transcript)
+            except Exception as transcribe_err:
+                logger.exception("Transcription failed for capture %s", capture_id)
+                transcript = failed_transcript(transcribe_err)
+                resolved_stt = stt_model or "unknown"
 
         row = DBCapture(
             id=capture_id,
@@ -208,6 +247,7 @@ async def refine_capture(
     capture_id: str,
     flags: RefinementFlags,
     model_size: Optional[str],
+    provider: str,
     db: Session,
 ) -> Optional[CaptureResponse]:
     row = db.query(DBCapture).filter(DBCapture.id == capture_id).first()
@@ -218,6 +258,7 @@ async def refine_capture(
         row.transcript_raw or "",
         flags,
         model_size=model_size,
+        provider=provider,
     )
 
     row.transcript_refined = refined
@@ -242,21 +283,15 @@ async def retranscribe_capture(
     if not resolved or not resolved.exists():
         raise FileNotFoundError(f"Audio for capture {capture_id} is missing")
 
-    use_groq = groq_stt.is_enabled()
-    if use_groq:
-        resolved_stt = "groq-whisper-large-v3-turbo"
-    else:
-        whisper = get_whisper_model()
-        resolved_stt = stt_model or whisper.model_size
-
     try:
-        if use_groq:
-            transcript = await groq_stt.transcribe_file(str(resolved), language)
-        else:
-            transcript = await whisper.transcribe(str(resolved), language, resolved_stt)
+        transcript, resolved_stt = await _transcribe_with_fallback(
+            resolved, language, stt_model
+        )
+        transcript = polish_dictation_text(transcript)
     except Exception as transcribe_err:
         logger.exception("Retranscription failed for capture %s", capture_id)
         transcript = failed_transcript(transcribe_err)
+        resolved_stt = stt_model or "unknown"
 
     row.transcript_raw = transcript
     row.stt_model = resolved_stt

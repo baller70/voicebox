@@ -12,12 +12,12 @@ import mimetypes
 import os
 import subprocess
 import tempfile
-import urllib.error
-import urllib.request
-import uuid
+import threading
+import time
 from pathlib import Path
 from typing import Optional
 
+import httpx
 import soundfile as sf
 
 from ..utils.audio import load_audio
@@ -26,6 +26,12 @@ GROQ_STT_MODEL = os.environ.get("VOICEBOX_GROQ_STT_MODEL", "whisper-large-v3-tur
 GROQ_STT_MAX_DIRECT_BYTES = int(os.environ.get("VOICEBOX_GROQ_STT_MAX_DIRECT_BYTES", "18000000"))
 GROQ_STT_CHUNK_SECONDS = float(os.environ.get("VOICEBOX_GROQ_STT_CHUNK_SECONDS", "110"))
 GROQ_STT_CHUNK_SAMPLE_RATE = 16000
+GROQ_STT_ATTEMPTS = max(1, int(os.environ.get("VOICEBOX_GROQ_STT_ATTEMPTS", "2")))
+GROQ_STT_TIMEOUT_SECONDS = float(os.environ.get("VOICEBOX_GROQ_STT_TIMEOUT_SECONDS", "25"))
+GROQ_STT_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
+
+_client_lock = threading.Lock()
+_client: httpx.Client | None = None
 
 
 def is_enabled() -> bool:
@@ -57,36 +63,54 @@ def _transcribe_file_once(api_key: str, audio_path: Path, language: Optional[str
     if not audio_path.exists():
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
-    fields = {
+    data = {
         "model": GROQ_STT_MODEL,
         "response_format": "json",
     }
     if language:
-        fields["language"] = language
+        data["language"] = language
 
-    body, content_type = _multipart_body(fields, audio_path)
-    req = urllib.request.Request(
-        "https://api.groq.com/openai/v1/audio/transcriptions",
-        data=body,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": content_type,
-            "User-Agent": "VoiceBox-Groq-STT/1.0",
-        },
-        method="POST",
-    )
+    payload = None
+    for attempt in range(1, GROQ_STT_ATTEMPTS + 1):
+        try:
+            with audio_path.open("rb") as audio_file:
+                response = _get_client().post(
+                    GROQ_STT_URL,
+                    data=data,
+                    files={
+                        "file": (
+                            audio_path.name,
+                            audio_file,
+                            mimetypes.guess_type(audio_path.name)[0] or "application/octet-stream",
+                        )
+                    },
+                    headers={"Authorization": f"Bearer {api_key}"},
+                )
+            response.raise_for_status()
+            payload = response.json()
+            break
+        except httpx.HTTPStatusError as e:
+            error = RuntimeError(f"Groq STT request failed: {_format_error(e.response.text)}")
+            if attempt >= GROQ_STT_ATTEMPTS or not _is_transient_http_status(e.response.status_code):
+                raise error from e
+        except (TimeoutError, httpx.TimeoutException, httpx.TransportError) as e:
+            _reset_client()
+            if attempt >= GROQ_STT_ATTEMPTS:
+                raise RuntimeError(f"Groq STT request failed after {attempt} attempts: {e}") from e
 
-    try:
-        with urllib.request.urlopen(req, timeout=90) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Groq STT request failed: {_format_error(detail)}") from e
+        time.sleep(0.5 * attempt)
+
+    if payload is None:
+        raise RuntimeError("Groq STT request failed without a response")
 
     text = payload.get("text")
     if not isinstance(text, str):
         raise RuntimeError(f"Groq STT response did not include text: {payload!r}")
     return text.strip()
+
+
+def _is_transient_http_status(status: int) -> bool:
+    return status in {408, 425, 429} or status >= 500
 
 
 def _transcribe_file_in_chunks(api_key: str, audio_path: Path, language: Optional[str]) -> str:
@@ -118,34 +142,28 @@ def _is_payload_too_large(error: RuntimeError) -> bool:
     return "413" in message or "payload too large" in message or "request entity too large" in message
 
 
-def _multipart_body(fields: dict[str, str], file_path: Path) -> tuple[bytes, str]:
-    boundary = f"----voicebox-groq-{uuid.uuid4().hex}"
-    chunks: list[bytes] = []
+def _get_client() -> httpx.Client:
+    global _client
+    with _client_lock:
+        if _client is None:
+            _client = httpx.Client(
+                timeout=GROQ_STT_TIMEOUT_SECONDS,
+                headers={"User-Agent": "VoiceBox-Groq-STT/1.0"},
+                limits=httpx.Limits(max_keepalive_connections=4, max_connections=8),
+            )
+        return _client
 
-    for name, value in fields.items():
-        chunks.extend(
-            [
-                f"--{boundary}\r\n".encode(),
-                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode(),
-                value.encode(),
-                b"\r\n",
-            ]
-        )
 
-    mime = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
-    chunks.extend(
-        [
-            f"--{boundary}\r\n".encode(),
-            (
-                f'Content-Disposition: form-data; name="file"; filename="{file_path.name}"\r\n'
-                f"Content-Type: {mime}\r\n\r\n"
-            ).encode(),
-            file_path.read_bytes(),
-            b"\r\n",
-            f"--{boundary}--\r\n".encode(),
-        ]
-    )
-    return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
+def _reset_client() -> None:
+    global _client
+    with _client_lock:
+        client = _client
+        _client = None
+    if client is not None:
+        try:
+            client.close()
+        except Exception:
+            pass
 
 
 def _get_api_key() -> str:

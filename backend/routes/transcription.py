@@ -4,6 +4,7 @@ import asyncio
 import tempfile
 from pathlib import Path
 
+import soundfile as sf
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from .. import models
@@ -14,6 +15,16 @@ from ..utils.tasks import get_task_manager
 router = APIRouter()
 
 UPLOAD_CHUNK_SIZE = 1024 * 1024  # 1MB
+
+
+def _read_duration_seconds(audio_path: str) -> float | None:
+    try:
+        info = sf.info(audio_path)
+    except Exception:
+        return None
+    if info.samplerate <= 0:
+        return None
+    return info.frames / info.samplerate
 
 
 @router.post("/transcribe", response_model=models.TranscriptionResponse)
@@ -32,15 +43,21 @@ async def transcribe_audio(
         from ..utils.audio import load_audio
         from ..backends import WHISPER_HF_REPOS
 
-        audio, sr = await asyncio.to_thread(load_audio, tmp_path)
-        duration = len(audio) / sr
+        duration = await asyncio.to_thread(_read_duration_seconds, tmp_path)
+        if duration is None:
+            audio, sr = await asyncio.to_thread(load_audio, tmp_path)
+            duration = len(audio) / sr
 
+        groq_error: Exception | None = None
         if groq_stt.is_enabled():
-            text = await groq_stt.transcribe_file(tmp_path, language)
-            return models.TranscriptionResponse(
-                text=text,
-                duration=duration,
-            )
+            try:
+                text = await groq_stt.transcribe_file(tmp_path, language)
+                return models.TranscriptionResponse(
+                    text=text,
+                    duration=duration,
+                )
+            except Exception as exc:
+                groq_error = exc
 
         whisper_model = transcribe.get_whisper_model()
         model_size = model if model else whisper_model.model_size
@@ -76,7 +93,14 @@ async def transcribe_audio(
                 },
             )
 
-        text = await whisper_model.transcribe(tmp_path, language, model_size)
+        try:
+            text = await whisper_model.transcribe(tmp_path, language, model_size)
+        except Exception as local_error:
+            if groq_error is not None:
+                raise RuntimeError(
+                    f"Groq STT failed: {groq_error}; local Whisper fallback failed: {local_error}"
+                ) from local_error
+            raise
 
         return models.TranscriptionResponse(
             text=text,

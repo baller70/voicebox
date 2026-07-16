@@ -25,6 +25,37 @@ export const tauriAudio: PlatformAudio = {
     return new Blob([bytes], { type: 'audio/wav' });
   },
 
+  async isMicrophoneCaptureSupported(): Promise<boolean> {
+    return await invoke<boolean>('is_microphone_capture_supported');
+  },
+
+  async startMicrophoneCapture(maxDurationSecs: number): Promise<void> {
+    await invoke('start_microphone_capture', { maxDurationSecs });
+  },
+
+  async stopMicrophoneCapture(): Promise<Blob> {
+    const base64Data = await invoke<string>('stop_microphone_capture');
+    const binaryString = atob(base64Data);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    return new Blob([bytes], { type: 'audio/wav' });
+  },
+
+  async readMicrophoneCaptureChunk(minDurationMs: number): Promise<Blob | null> {
+    const base64Data = await invoke<string | null>('read_microphone_capture_chunk', {
+      minDurationMs,
+    });
+    if (!base64Data) return null;
+    const binaryString = atob(base64Data);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    return new Blob([bytes], { type: 'audio/wav' });
+  },
+
   async listOutputDevices(): Promise<AudioDevice[]> {
     return await invoke<AudioDevice[]>('list_audio_output_devices');
   },

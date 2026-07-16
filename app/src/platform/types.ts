@@ -45,6 +45,10 @@ export interface PlatformAudio {
   isSystemAudioSupported(): Promise<boolean>;
   startSystemAudioCapture(maxDurationSecs: number): Promise<void>;
   stopSystemAudioCapture(): Promise<Blob>;
+  isMicrophoneCaptureSupported(): Promise<boolean>;
+  startMicrophoneCapture(maxDurationSecs: number): Promise<void>;
+  stopMicrophoneCapture(): Promise<Blob>;
+  readMicrophoneCaptureChunk?(minDurationMs: number): Promise<Blob | null>;
   listOutputDevices(): Promise<AudioDevice[]>;
   playToDevices(audioData: Uint8Array, deviceIds: string[]): Promise<void>;
   stopPlayback(): void;
@@ -62,6 +66,7 @@ export interface PlatformLifecycle {
   setKeepServerRunning(keep: boolean): Promise<void>;
   setupWindowCloseHandler(): Promise<void>;
   subscribeToServerLogs(callback: (entry: ServerLogEntry) => void): () => void;
+  subscribeToServerExit(callback: () => void): () => void;
   onServerReady?: () => void;
 }
 

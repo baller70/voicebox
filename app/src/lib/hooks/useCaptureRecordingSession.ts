@@ -52,6 +52,31 @@ function isTranscriptionFailed(capture: CaptureResponse): boolean {
   return capture.transcript_raw?.startsWith(TRANSCRIPTION_FAILED_PREFIX) ?? false;
 }
 
+function mergeProgressiveTranscripts(parts: string[]): string {
+  return parts.reduce((merged, part) => mergeProgressivePair(merged, part.trim()), '').trim();
+}
+
+function mergeProgressivePair(left: string, right: string): string {
+  if (!left) return right;
+  if (!right) return left;
+
+  const leftWords = left.split(/\s+/);
+  const rightWords = right.split(/\s+/);
+  const maxOverlap = Math.min(14, leftWords.length, rightWords.length);
+  for (let size = maxOverlap; size >= 2; size -= 1) {
+    const leftTail = leftWords.slice(-size).map(normalizeProgressiveWord).join(' ');
+    const rightHead = rightWords.slice(0, size).map(normalizeProgressiveWord).join(' ');
+    if (leftTail && leftTail === rightHead) {
+      return [...leftWords, ...rightWords.slice(size)].join(' ');
+    }
+  }
+  return `${left} ${right}`;
+}
+
+function normalizeProgressiveWord(word: string): string {
+  return word.replace(/[^\w]/g, '').toLowerCase();
+}
+
 export type CapturePillState = PillState | 'hidden';
 
 export interface UseCaptureRecordingSessionOptions {
@@ -119,6 +144,7 @@ export function useCaptureRecordingSession(
 
   const onFinalTextRef = useRef(options.onFinalText);
   onFinalTextRef.current = options.onFinalText;
+  const progressiveTranscriptPromisesRef = useRef<Promise<string | null>[]>([]);
 
   // Snapshot of ``allow_auto_paste`` from the capture-create response —
   // held so the refine onSuccess (which only sees the plain CaptureResponse)
@@ -200,8 +226,15 @@ export function useCaptureRecordingSession(
   });
 
   const uploadMutation = useMutation({
-    mutationFn: async ({ file, source }: { file: File; source: CaptureSource }) =>
-      apiClient.createCapture(file, { source }),
+    mutationFn: async ({
+      file,
+      source,
+      transcriptRaw,
+    }: {
+      file: File;
+      source: CaptureSource;
+      transcriptRaw?: string;
+    }) => apiClient.createCapture(file, { source, transcriptRaw }),
     onSuccess: (capture) => {
       const transcriptionFailed = isTranscriptionFailed(capture);
       queryClient.setQueryData<CaptureListResponse>(['captures'], (prev) => {
@@ -246,7 +279,21 @@ export function useCaptureRecordingSession(
     stopRecording,
     error: recordError,
   } = useAudioRecording({
-    onRecordingComplete: (blob, recordedDuration) => {
+    onRecordingChunk: (blob) => {
+      const extension = blob.type.includes('wav') ? 'wav' : 'bin';
+      const file = new File([blob], `dictation-chunk-${Date.now()}.${extension}`, {
+        type: blob.type,
+      });
+      const transcription = apiClient
+        .transcribeAudio(file)
+        .then((result) => result.text.trim() || null)
+        .catch((err) => {
+          console.warn('Progressive transcription failed:', err);
+          return null;
+        });
+      progressiveTranscriptPromisesRef.current.push(transcription);
+    },
+    onRecordingComplete: async (blob, recordedDuration) => {
       // Trigger-happy tap — MediaRecorder hasn't emitted a usable chunk yet
       // so the blob is empty or unparseable. Surface it as a transient pill
       // so the user sees their recording was recognised and canceled.
@@ -264,7 +311,16 @@ export function useCaptureRecordingSession(
       const file = new File([blob], `dictation-${Date.now()}.${extension}`, {
         type: blob.type,
       });
-      uploadMutation.mutate({ file, source: 'dictation' });
+      const progressiveSettled = await Promise.allSettled(progressiveTranscriptPromisesRef.current);
+      const transcriptParts = progressiveSettled
+        .map((result) => (result.status === 'fulfilled' ? result.value : null))
+        .filter((text): text is string => Boolean(text));
+      const transcriptRaw = mergeProgressiveTranscripts(transcriptParts);
+      uploadMutation.mutate({
+        file,
+        source: 'dictation',
+        transcriptRaw: transcriptRaw || undefined,
+      });
     },
   });
 
@@ -278,6 +334,7 @@ export function useCaptureRecordingSession(
     if (isRecording) return;
     clearRestTimer();
     setFrozenElapsedMs(0);
+    progressiveTranscriptPromisesRef.current = [];
     setPillState('recording');
     beginAudioRecording();
   }, [isRecording, beginAudioRecording, clearRestTimer]);

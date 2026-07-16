@@ -111,6 +111,29 @@ class TauriLifecycle implements PlatformLifecycle {
       unlisten = null;
     };
   }
+
+  subscribeToServerExit(callback: () => void): () => void {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+
+    void listen('server-exited', () => callback())
+      .then((fn) => {
+        if (disposed) {
+          fn();
+          return;
+        }
+        unlisten = fn;
+      })
+      .catch((error) => {
+        console.error('Failed to subscribe to server exit:', error);
+      });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+      unlisten = null;
+    };
+  }
 }
 
 export const tauriLifecycle = new TauriLifecycle();

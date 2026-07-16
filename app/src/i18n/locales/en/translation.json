@@ -949,10 +949,16 @@
       },
       "refinement": {
         "title": "Refinement",
-        "description": "Optionally run a local LLM over transcripts to clean filler words, punctuation, and self-corrections.",
+        "description": "Optionally run Groq or a local LLM over transcripts to clean filler words, punctuation, and self-corrections.",
         "auto": {
           "title": "Refine transcripts automatically",
           "description": "Runs after every capture. You can still toggle between raw and refined in the Captures tab."
+        },
+        "provider": {
+          "title": "Refinement provider",
+          "description": "Choose Groq for cloud prompt polish or local Qwen for offline cleanup.",
+          "groq": "Groq Prompt Polish",
+          "local": "Local Qwen"
         },
         "model": {
           "title": "Refinement model",

@@ -5116,6 +5116,7 @@ name = "voicebox"
 version = "0.5.0"
 dependencies = [
  "base64 0.22.1",
+ "block2",
  "core-foundation-sys",
  "coreaudio-sys",
  "cpal",

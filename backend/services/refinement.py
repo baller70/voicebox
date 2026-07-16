@@ -269,6 +269,7 @@ async def refine_transcript(
     transcript: str,
     flags: RefinementFlags,
     model_size: str | None = None,
+    provider: str = "local",
 ) -> tuple[str, str]:
     """Run the transcript through the LLM with the built system prompt.
 
@@ -276,6 +277,11 @@ async def refine_transcript(
         (refined_text, llm_model_size) — so callers can persist which model
         produced the refinement.
     """
+    if provider == "groq":
+        from . import groq_refinement
+
+        return await groq_refinement.refine_transcript(transcript, flags)
+
     backend = llm_service.get_llm_model()
     resolved_size = model_size or backend.model_size
 

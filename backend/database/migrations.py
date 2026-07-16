@@ -215,6 +215,13 @@ def _migrate_capture_settings(engine, inspector, tables: set[str]) -> None:
             "allow_auto_paste BOOLEAN NOT NULL DEFAULT 1",
             "allow_auto_paste",
         )
+    if "refinement_provider" not in columns:
+        _add_column(
+            engine,
+            "capture_settings",
+            "refinement_provider VARCHAR NOT NULL DEFAULT 'groq'",
+            "refinement_provider",
+        )
     if "default_playback_voice_id" not in columns:
         _add_column(
             engine,

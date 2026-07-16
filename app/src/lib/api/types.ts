@@ -140,6 +140,7 @@ export interface HistoryListResponse {
 export type WhisperModelSize = 'base' | 'small' | 'medium' | 'large' | 'turbo';
 
 export type Qwen3ModelSize = '0.6B' | '1.7B' | '4B';
+export type RefinementProvider = 'local' | 'groq';
 
 export type CaptureSource = 'dictation' | 'recording' | 'file';
 
@@ -194,6 +195,7 @@ export interface CaptureCreateResponse extends CaptureResponse {
 export interface CaptureRefineRequest {
   flags?: RefinementFlags;
   model_size?: Qwen3ModelSize;
+  provider?: RefinementProvider;
 }
 
 export interface CaptureRetranscribeRequest {
@@ -205,6 +207,7 @@ export interface CaptureSettings {
   stt_model: WhisperModelSize;
   language: string;
   auto_refine: boolean;
+  refinement_provider: RefinementProvider;
   llm_model: Qwen3ModelSize;
   smart_cleanup: boolean;
   self_correction: boolean;
